@@ -40,6 +40,12 @@
 #define SPM_AVS_CTL_MAX_VLVL		GENMASK(22, 17)
 #define SPM_AVS_CTL_MIN_VLVL		GENMASK(15, 10)
 
+/* SAW2 v2.1 specific definitions */
+#define SPM_2_1_VCTL_VLVL		GENMASK(7, 0)
+#define SPM_2_1_VCTL_PORT		GENMASK(18, 16)
+#define SPM_2_1_AVS_CTL_AVS_ENABLED	BIT(0)
+#define SPM_2_1_PMIC_STS_CURR_VLVL	GENMASK(7, 0)
+
 enum spm_reg {
 	SPM_REG_CFG,
 	SPM_REG_SPM_CTL,
@@ -194,16 +200,47 @@ static const u16 spm_reg_offset_v2_1[SPM_REG_NR] = {
 	[SPM_REG_SEQ_ENTRY]	= 0x80,
 };
 
+/* Extended v2.1 offset table with voltage control registers for 8974/8084 */
+static const u16 spm_reg_offset_v2_1_cpu[SPM_REG_NR] = {
+	[SPM_REG_CFG]		= 0x08,
+	[SPM_REG_STS0]		= 0x0C,
+	[SPM_REG_PMIC_STS]	= 0x14,
+	[SPM_REG_RST]		= 0x18,
+	[SPM_REG_VCTL]		= 0x1C,
+	[SPM_REG_AVS_CTL]	= 0x20,
+	[SPM_REG_AVS_LIMIT]	= 0x24,
+	[SPM_REG_SPM_CTL]	= 0x30,
+	[SPM_REG_DLY]		= 0x34,
+	[SPM_REG_PMIC_DATA_0]	= 0x40,
+	[SPM_REG_PMIC_DATA_1]	= 0x44,
+	[SPM_REG_SEQ_ENTRY]	= 0x80,
+};
+
+static void smp_set_vdd_v1_1(void *data);
+static void smp_set_vdd_v2_1(void *data);
+
+static struct linear_range spm_v1_1_regulator_range =
+	REGULATOR_LINEAR_RANGE(700000, 0, 56, 12500);
+
+static struct linear_range spm_v2_1_regulator_range =
+	REGULATOR_LINEAR_RANGE(350000, 0, 185, 5000);
+
 /* SPM register data for 8974, 8084 */
 static const struct spm_reg_data spm_reg_8974_8084_cpu  = {
-	.reg_offset = spm_reg_offset_v2_1,
+	.reg_offset = spm_reg_offset_v2_1_cpu,
 	.spm_cfg = 0x1,
 	.spm_dly = 0x3C102800,
+	.pmic_data[0] = 0x02030080,
+	.pmic_data[1] = 0x00030000,
 	.seq = { 0x03, 0x0B, 0x0F, 0x00, 0x20, 0x80, 0x10, 0xE8, 0x5B, 0x03,
 		0x3B, 0xE8, 0x5B, 0x82, 0x10, 0x0B, 0x30, 0x06, 0x26, 0x30,
 		0x0F },
 	.start_index[PM_SLEEP_MODE_STBY] = 0,
 	.start_index[PM_SLEEP_MODE_SPC] = 3,
+	.set_vdd = smp_set_vdd_v2_1,
+	.range = &spm_v2_1_regulator_range,
+	.init_uV = 1100000,
+	.ramp_delay = 1250,
 };
 
 /* SPM register data for 8226 */
@@ -230,12 +267,6 @@ static const u16 spm_reg_offset_v1_1[SPM_REG_NR] = {
 	[SPM_REG_PMIC_DATA_1]	= 0x2C,
 	[SPM_REG_SEQ_ENTRY]	= 0x80,
 };
-
-static void smp_set_vdd_v1_1(void *data);
-
-/* SPM register data for 8064 */
-static struct linear_range spm_v1_1_regulator_range =
-	REGULATOR_LINEAR_RANGE(700000, 0, 56, 12500);
 
 static const struct spm_reg_data spm_reg_8064_cpu = {
 	.reg_offset = spm_reg_offset_v1_1,
@@ -381,6 +412,57 @@ static void smp_set_vdd_v1_1(void *data)
 enable_avs:
 	if (avs_enabled) {
 		avs_ctl |= SPM_1_1_AVS_CTL_AVS_ENABLED;
+		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
+	}
+}
+
+static void smp_set_vdd_v2_1(void *data)
+{
+	struct spm_driver_data *drv = data;
+	unsigned int vctl, avs_ctl, pmic_sts;
+	unsigned int vlevel, volt_sel;
+	bool avs_enabled;
+
+	volt_sel = drv->volt_sel;
+	vlevel = volt_sel;
+
+	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
+	avs_enabled = avs_ctl & SPM_2_1_AVS_CTL_AVS_ENABLED;
+
+	if (avs_enabled) {
+		avs_ctl &= ~SPM_2_1_AVS_CTL_AVS_ENABLED;
+		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
+	}
+
+	spm_register_write(drv, SPM_REG_RST, 1);
+
+	vctl = spm_register_read(drv, SPM_REG_VCTL);
+	vctl &= ~(SPM_2_1_VCTL_VLVL | SPM_2_1_VCTL_PORT);
+	vctl |= vlevel;
+	spm_register_write(drv, SPM_REG_VCTL, vctl);
+
+	if (read_poll_timeout_atomic(spm_register_read,
+				     pmic_sts,
+				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
+				     1, 200, false,
+				     drv, SPM_REG_PMIC_STS)) {
+		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
+				    pmic_sts & 0xff, vlevel);
+		goto enable_avs_v2_1;
+	}
+
+	if (avs_enabled) {
+		unsigned int max_avs = volt_sel;
+		unsigned int min_avs = max(max_avs, 4U) - 4;
+
+		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MIN_VLVL, min_avs);
+		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MAX_VLVL, max_avs);
+		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
+	}
+
+enable_avs_v2_1:
+	if (avs_enabled) {
+		avs_ctl |= SPM_2_1_AVS_CTL_AVS_ENABLED;
 		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
 	}
 }
