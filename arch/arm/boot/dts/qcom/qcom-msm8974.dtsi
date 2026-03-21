@@ -2065,13 +2065,6 @@
 			clock-output-names = "hfpll3";
 		};
 
-		kraitcc: clock-controller {
-			compatible = "qcom,krait-cc-v2";
-			#clock-cells = <1>;
-			clocks = <&hfpll0>, <&hfpll1>, <&hfpll2>, <&hfpll3>, <&hfpll_l2>;
-			clock-names = "hfpll0", "hfpll1", "hfpll2", "hfpll3", "hfpll_l2";
-		};
-
 		sdhc_1: mmc@f9824900 {
 			compatible = "qcom,msm8974-sdhci", "qcom,sdhci-msm-v4";
 			reg = <0xf9824900 0x11c>, <0xf9824000 0x800>;
@@ -2852,7 +2845,7 @@
 			#size-cells = <1>;
 
 			speedbin_efuse: speedbin@0 {
-				reg = <0x0 0x4>;
+				reg = <0x0 0x8>;
 			};
 		};
 
@@ -3880,7 +3873,7 @@
 			cooling-maps {
 				map0 {
 					trip = <&cpu_alert0>;
-					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -3907,7 +3900,7 @@
 			cooling-maps {
 				map0 {
 					trip = <&cpu_alert1>;
-					cooling-device = <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -3934,7 +3927,7 @@
 			cooling-maps {
 				map0 {
 					trip = <&cpu_alert2>;
-					cooling-device = <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -3961,7 +3954,7 @@
 			cooling-maps {
 				map0 {
 					trip = <&cpu_alert3>;
-					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -4055,6 +4048,13 @@
 				};
 			};
 		};
+	};
+
+	kraitcc: clock-controller {
+		compatible = "qcom,krait-cc-v2";
+		#clock-cells = <1>;
+		clocks = <&hfpll0>, <&hfpll1>, <&hfpll2>, <&hfpll3>, <&hfpll_l2>;
+		clock-names = "hfpll0", "hfpll1", "hfpll2", "hfpll3", "hfpll_l2";
 	};
 
 	timer {
