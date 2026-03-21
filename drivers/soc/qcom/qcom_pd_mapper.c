@@ -370,6 +370,13 @@ static const struct qcom_pdm_domain_data *msm8953_domains[] = {
 	&mpss_root_pd,	&mpss_wlan_pd, NULL,
 };
 
+static const struct qcom_pdm_domain_data *msm8974_domains[] = {
+	&adsp_audio_pd,
+	&adsp_root_pd,
+	&adsp_sensor_pd,
+	NULL,
+};
+
 static const struct qcom_pdm_domain_data *msm8998_domains[] = {
 	&mpss_root_pd,
 	&mpss_wlan_pd,
@@ -519,7 +526,7 @@ static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
 	},
 	{
 		.compatible = "qcom,msm8974",
-		.data = NULL,
+		.data = msm8974_domains,
 	},
 	{
 		.compatible = "qcom,msm8996",
