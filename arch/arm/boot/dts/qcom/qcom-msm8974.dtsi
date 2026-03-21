@@ -48,7 +48,7 @@
 			clocks = <&kraitcc 0>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			cpu-supply = <&saw0_vreg>;
+			cpu-supply = <&saw_l2_vreg>;
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -64,7 +64,7 @@
 			clocks = <&kraitcc 1>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			cpu-supply = <&saw1_vreg>;
+			cpu-supply = <&saw_l2_vreg>;
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -80,7 +80,7 @@
 			clocks = <&kraitcc 2>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			cpu-supply = <&saw2_vreg>;
+			cpu-supply = <&saw_l2_vreg>;
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -96,7 +96,7 @@
 			clocks = <&kraitcc 3>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			cpu-supply = <&saw3_vreg>;
+			cpu-supply = <&saw_l2_vreg>;
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -1891,6 +1891,11 @@
 		saw_l2: power-manager@f9012000 {
 			compatible = "qcom,msm8974-saw2-v2.1-l2", "qcom,saw2";
 			reg = <0xf9012000 0x1000>;
+
+			saw_l2_vreg: regulator {
+				regulator-min-microvolt = <350000>;
+				regulator-max-microvolt = <1275000>;
+			};
 		};
 
 		hfpll_l2: clock@f9016000 {
@@ -1977,11 +1982,6 @@
 		saw0: power-manager@f9089000 {
 			compatible = "qcom,msm8974-saw2-v2.1-cpu", "qcom,saw2";
 			reg = <0xf9089000 0x1000>, <0xf9009000 0x1000>;
-
-			saw0_vreg: regulator {
-				regulator-min-microvolt = <350000>;
-				regulator-max-microvolt = <1275000>;
-			};
 		};
 
 		acc1: power-manager@f9098000 {
@@ -1992,11 +1992,6 @@
 		saw1: power-manager@f9099000 {
 			compatible = "qcom,msm8974-saw2-v2.1-cpu", "qcom,saw2";
 			reg = <0xf9099000 0x1000>, <0xf9009000 0x1000>;
-
-			saw1_vreg: regulator {
-				regulator-min-microvolt = <350000>;
-				regulator-max-microvolt = <1275000>;
-			};
 		};
 
 		acc2: power-manager@f90a8000 {
@@ -2007,11 +2002,6 @@
 		saw2: power-manager@f90a9000 {
 			compatible = "qcom,msm8974-saw2-v2.1-cpu", "qcom,saw2";
 			reg = <0xf90a9000 0x1000>, <0xf9009000 0x1000>;
-
-			saw2_vreg: regulator {
-				regulator-min-microvolt = <350000>;
-				regulator-max-microvolt = <1275000>;
-			};
 		};
 
 		acc3: power-manager@f90b8000 {
@@ -2022,11 +2012,6 @@
 		saw3: power-manager@f90b9000 {
 			compatible = "qcom,msm8974-saw2-v2.1-cpu", "qcom,saw2";
 			reg = <0xf90b9000 0x1000>, <0xf9009000 0x1000>;
-
-			saw3_vreg: regulator {
-				regulator-min-microvolt = <350000>;
-				regulator-max-microvolt = <1275000>;
-			};
 		};
 
 		hfpll0: clock@f908a000 {
