@@ -20,6 +20,19 @@ config ACPI_ALS
 	  To compile this driver as a module, choose M here: the module will
 	  be called acpi-als.
 
+config QCOM_SMGR_LIGHT
+	tristate "Qualcomm SMGR ambient light sensor"
+	depends on IIO_QCOM_SMGR
+	select IIO_BUFFER
+	select IIO_KFIFO_BUF
+	help
+	  Say Y here if you want to build a driver for the Qualcomm Sensor
+	  Manager ambient light sensor, as found on devices using ADSP-based
+	  sensor management (e.g. MSM8974).
+
+	  To compile this driver as a module, choose M here: the module will
+	  be called qcom_smgr_light.
+
 config ADJD_S311
 	tristate "ADJD-S311-CR999 digital color sensor"
 	select IIO_BUFFER
