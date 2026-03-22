@@ -51,7 +51,8 @@ static int qcom_smgr_prox_probe(struct platform_device *pdev)
 
 	priv = iio_priv(iio_dev);
 	priv->sensor = *(struct qcom_smgr_sensor **)pdev->dev.platform_data;
-	priv->sensor->iio_dev = iio_dev;
+	priv->data_type_idx = SNS_SMGR_DATA_TYPE_PRIMARY;
+	priv->sensor->iio_devs[priv->data_type_idx] = iio_dev;
 
 	iio_dev->name = "qcom-smgr-prox";
 	iio_dev->info = &qcom_smgr_iio_info;
@@ -82,7 +83,7 @@ static void qcom_smgr_prox_remove(struct platform_device *pdev)
 {
 	struct qcom_smgr_sensor *sensor = platform_get_drvdata(pdev);
 
-	sensor->iio_dev = NULL;
+	sensor->iio_devs[SNS_SMGR_DATA_TYPE_PRIMARY] = NULL;
 }
 
 static const struct platform_device_id qcom_smgr_prox_ids[] = {
