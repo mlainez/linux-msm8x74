@@ -331,6 +331,9 @@ static void qcom_smgr_buffering_report_handler(struct qmi_handle *hdl,
 	struct qcom_smgr_sensor *sensor;
 	struct iio_dev *iio_dev;
 	u8 i, data_type;
+	/* Largest IIO scan buffer: 3x u32 values + 4-byte padding + u64 timestamp */
+	u8 buf[24] __aligned(8);
+	int num_data_channels;
 
 	for (i = 0; i < smgr->sensor_count; ++i) {
 		sensor = &smgr->sensors[i];
@@ -344,8 +347,20 @@ static void qcom_smgr_buffering_report_handler(struct qmi_handle *hdl,
 			if (!iio_dev)
 				return;
 
+			/*
+			 * SMGR always reports 3 values per sample, but
+			 * single-channel sensors (proximity, light) only use
+			 * the first one. Copy only the data channels defined
+			 * by the IIO device to avoid leaking unrelated SMGR
+			 * sample fields into the IIO buffer.
+			 */
+			num_data_channels = iio_dev->num_channels - 1;
+			memset(buf, 0, sizeof(buf));
+			memcpy(buf, ind->samples[0].values,
+			       num_data_channels * sizeof(u32));
+
 			iio_push_to_buffers_with_timestamp(
-				iio_dev, ind->samples[0].values,
+				iio_dev, buf,
 				ind->metadata.timestamp);
 			return;
 		}
