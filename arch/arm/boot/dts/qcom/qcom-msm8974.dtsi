@@ -2131,6 +2131,26 @@
 			};
 		};
 
+		mdp_iommu: iommu@fd928000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
+			reg = <0xfd928000 0x10000>;
+			ranges;
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>;
+			clock-names = "iface", "bus";
+			qcom,iommu-secure-id = <1>;
+
+			/* mdp_0 non-secure context bank */
+			iommu-ctx@fd930000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0xfd930000 0x1000>;
+				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
 		cci: cci@fda0c000 {
 			compatible = "qcom,msm8974-cci";
 			#address-cells = <1>;
