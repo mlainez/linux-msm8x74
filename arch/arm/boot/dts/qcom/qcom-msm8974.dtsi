@@ -9,6 +9,7 @@
 #include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/power/qcom-rpmpd.h>
 #include <dt-bindings/reset/qcom,gcc-msm8974.h>
+#include <dt-bindings/soc/qcom,apr.h>
 
 / {
 	#address-cells = <1>;
@@ -2225,6 +2226,40 @@
 			};
 		};
 
+		slim_bam: dma-controller@fe104000 {
+			compatible = "qcom,bam-v1.4.0";
+			reg = <0xfe104000 0x20000>;
+			interrupts = <GIC_SPI 164 IRQ_TYPE_LEVEL_HIGH>;
+
+			#dma-cells = <1>;
+			qcom,ee = <1>;
+			qcom,controlled-remotely;
+			num-channels = <31>;
+			qcom,num-ees = <2>;
+
+			status = "disabled";
+		};
+
+		slimbus: slim-ngd@fe12f000 {
+			compatible = "qcom,slim-ngd-v1.5.0";
+			reg = <0xfe12f000 0x35000>;
+			interrupts = <GIC_SPI 163 IRQ_TYPE_LEVEL_HIGH>;
+
+			dmas = <&slim_bam 3>, <&slim_bam 4>;
+			dma-names = "rx", "tx";
+
+			#address-cells = <1>;
+			#size-cells = <0>;
+
+			status = "disabled";
+
+			slim@1 {
+				reg = <1>;
+				#address-cells = <2>;
+				#size-cells = <0>;
+			};
+		};
+
 		remoteproc_adsp: remoteproc@fe200000 {
 			compatible = "qcom,msm8974-adsp-pil";
 			reg = <0xfe200000 0x100>;
@@ -2255,6 +2290,54 @@
 				mboxes = <&apcs 8>;
 				qcom,smd-edge = <1>;
 				label = "lpass";
+
+				apr: apr {
+					compatible = "qcom,apr-v2";
+					qcom,smd-channels = "apr_audio_svc";
+					qcom,domain = <APR_DOMAIN_ADSP>;
+					#address-cells = <1>;
+					#size-cells = <0>;
+					status = "disabled";
+
+					q6core: service@3 {
+						compatible = "qcom,q6core";
+						reg = <APR_SVC_ADSP_CORE>;
+					};
+
+					q6afe: service@4 {
+						compatible = "qcom,q6afe";
+						reg = <APR_SVC_AFE>;
+
+						q6afedai: dais {
+							compatible = "qcom,q6afe-dais";
+							#address-cells = <1>;
+							#size-cells = <0>;
+							#sound-dai-cells = <1>;
+						};
+					};
+
+					q6asm: service@7 {
+						compatible = "qcom,q6asm";
+						reg = <APR_SVC_ASM>;
+
+						q6asmdai: dais {
+							compatible = "qcom,q6asm-dais";
+							#address-cells = <1>;
+							#size-cells = <0>;
+							#sound-dai-cells = <1>;
+						};
+					};
+
+					q6adm: service@8 {
+						compatible = "qcom,q6adm";
+						reg = <APR_SVC_ADM>;
+
+						q6routing: routing {
+							compatible = "qcom,q6adm-routing";
+							#sound-dai-cells = <0>;
+						};
+					};
+				};
 			};
 		};
 
