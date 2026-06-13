@@ -2187,6 +2187,16 @@ config SND_SOC_UDA1380
 config SND_SOC_WCD_CLASSH
 	tristate
 
+config SND_SOC_WCD9320
+	tristate "WCD9320 Codec"
+	depends on SLIMBUS
+	select REGMAP_SLIMBUS
+	select REGMAP_IRQ
+	select SND_SOC_WCD_CLASSH
+	help
+	  The WCD9320 (Taiko) is a SLIMbus audio CODEC used on Qualcomm
+	  MSM8974-class platforms such as the Fairphone 2.
+
 config SND_SOC_WCD9335
 	tristate "WCD9335 Codec"
 	depends on SLIMBUS
