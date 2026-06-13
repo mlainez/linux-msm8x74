@@ -86,6 +86,10 @@
 	};
 };
 
+&apr {
+	status = "okay";
+};
+
 &blsp1_i2c2 {
 	status = "okay";
 
