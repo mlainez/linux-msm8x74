@@ -17,10 +17,22 @@
 #include "wcd9320-registers.h"
 
 
+/*
+ * Like the PGD, the interface device's value elements live at a flat
+ * 0x800 offset (element = 0x800 + reg). Model it with reg_base, not a
+ * regmap paging window: a selector_reg of 0x800 aliases IFC register
+ * 0x000, which regmap's page-select read-modify-write would silently
+ * clobber on every access (see wcd9320_regmap_config for the full
+ * story -- on the PGD this zeroed CHIP_CTL and broke the core clock).
+ */
 static const struct regmap_config wcd9320_ifd_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
-//	.can_multi_write = true,
+	.can_multi_write = true,
+	/* no cache: every IFC port-config write must reach the codec */
+	.cache_type = REGCACHE_NONE,
+	.reg_base = 0x800,
+	.max_register = WCD9320_MAX_REGISTER,
 };
 
 
@@ -153,11 +165,43 @@ static irqreturn_t irq_handler(int irq, void *dev_id)
 			     WCD9320_SLIM_PGD_PORT_INT_CLR_RX_0 + 3, istatus[3]);
 
 		for (i = 0; i < 32; i++) {
-			if (istatus[i / 8] & (1 << i & 7)) {
+			if (istatus[i / 8] & (1 << (i % 8))) {
 				regmap_read(wcd->ifd_regmap,
 					    WCD9320_SLIM_PGD_PORT_INT_RX_SOURCE0 + i,
 					    &tmp);
 				dev_dbg(wcd->dev, "%u %u\n", i, tmp);
+
+				/*
+				 * Overflow/underflow on RX/TX ports is normal,
+				 * benign, and expected (matches the downstream
+				 * taiko_slimbus_irq() handling exactly): just
+				 * mask the port's own interrupt-enable bit so
+				 * it stops reasserting, and leave the port's
+				 * data-path config register alone. Toggling
+				 * PGD_PORT_CFG here (as a previous version of
+				 * this driver did) repeatedly disabled and
+				 * re-armed the live data port on every single
+				 * overflow -- which fires every ~8.6ms during
+				 * normal playback -- and silently prevented
+				 * any sustained data flow to the interpolator.
+				 */
+				if (tmp & 0x3) {
+					bool tx = i >= 16;
+					unsigned int port_id = tx ? i - 16 : i;
+					u16 reg = (tx ? WCD9320_SLIM_PGD_PORT_INT_TX_EN0
+						      : WCD9320_SLIM_PGD_PORT_INT_EN0)
+						  + port_id / 8;
+					unsigned int en = 0;
+
+					dev_dbg_ratelimited(wcd->dev,
+						"%s on %s port %u (src=0x%x), masking port IRQ\n",
+						(tmp & 0x1) ? "overflow" : "underflow",
+						tx ? "TX" : "RX", port_id, tmp);
+					regmap_read(wcd->ifd_regmap, reg, &en);
+					if (en & (1 << (port_id % 8)))
+						regmap_write(wcd->ifd_regmap, reg,
+							     en ^ (1 << (port_id % 8)));
+				}
 			}
 		}
 	}
@@ -207,7 +251,15 @@ static int wcd9320_bring_up(struct wcd9320 *wcd)
 	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0, 0xbf);
 	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0, 0xff);
 	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0, 0xdd);
-	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0, 0xcd);
+	/*
+	 * Unmask bit0 (WCD9320_IRQ_SLIMBUS) too: it was left masked here
+	 * (0xcd keeps bit0 set), so the codec's SLIM RX-port overflow/
+	 * underflow events (which roll up through this top-level bit)
+	 * never assert the external "wcd" GPIO IRQ, and irq_handler() --
+	 * which reads+clears PORT_INT_STATUS/SOURCE for the active port --
+	 * never runs to service them.
+	 */
+	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0, 0xcc);
 	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0 + 2, 0xfe);
 	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0 + 2, 0xff);
 	regmap_write(wcd->regmap, WCD9XXX_A_INTR_MASK0 + 2, 0xfd);
@@ -283,7 +335,7 @@ static int wcd9320_slim_probe(struct slim_device *slim)
 static int wcd9320_slim_status(struct slim_device *sdev,
 				 enum slim_device_status s)
 {
-	int ret;
+	int ret, i;
 	struct wcd9320 *wcd;
 	struct device_node *np;
 	struct device *dev;
@@ -311,6 +363,20 @@ static int wcd9320_slim_status(struct slim_device *sdev,
 		return 0;
 	}
 
+	/* Assign the interface device a logical address so the NGD can
+	 * schedule SLIM data channels to it (otherwise it stays at LA 0
+	 * and data-channel setup times out). The IFD may report present
+	 * slightly after the PGD, so retry until it enumerates.
+	 */
+	for (i = 0; i < 20; i++) {
+		if (!slim_get_logical_addr(wcd->slim_ifd))
+			break;
+		msleep(20);
+	}
+	if (!wcd->slim_ifd->is_laddr_valid)
+		dev_err(wcd->dev, "IFD did not get a logical address (laddr=0x%x)\n",
+			wcd->slim_ifd->laddr);
+
 	wcd->ifd_regmap = regmap_init_slimbus(wcd->slim_ifd, &wcd9320_ifd_regmap_config);
 	if (IS_ERR(wcd->ifd_regmap)) {
 		ret = PTR_ERR(wcd->ifd_regmap);
@@ -335,10 +401,19 @@ static void wcd9320_slim_remove(struct slim_device *sdev)
 }
 
 static const struct slim_device_id wcd9320_slim_id[] = {
+	/*
+	 * Only bind the PGD (generic device, dev_index 1). The interface
+	 * device (dev_index 0) must NOT be bound here: it is fetched via
+	 * of_slim_get_device() from the PGD's slim_status() and assigned a
+	 * logical address there. Binding it to this driver too makes it
+	 * probe-defer on "Failed to get logical address" and leaves its
+	 * regmap non-functional, so SLIM port programming never reaches
+	 * the hardware and no audio data flows.
+	 */
 	{0x217, 0xa0, 0x1, 0x0},
-	{0x217, 0xa0, 0x0, 0x0},
 	{}
 };
+MODULE_DEVICE_TABLE(slim, wcd9320_slim_id);
 
 static struct slim_driver wcd9320_slim_driver = {
 	.driver = {

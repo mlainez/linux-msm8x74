@@ -165,8 +165,14 @@ struct wcd9320_priv {
 	struct wcd_clsh_cdc_data clsh_d;
 	/* to track the status */
 	unsigned long status_mask;
-	/* Port values for Rx and Tx codec_dai */
-	unsigned int rx_port_value;
+	/*
+	 * Per-port mux values for the "SLIM RXn MUX" kcontrols, indexed by
+	 * widget->shift. Must be per-port: a single shared value makes every
+	 * mux read back whichever one was set LAST, so a mixer state save
+	 * (alsactl store) records the wrong AIF selection for all but the
+	 * most recently touched port.
+	 */
+	unsigned int rx_port_value[16];
 	unsigned int tx_port_value;
 	/* Tasha Interpolator Mode Select for EAR, HPH_L and HPH_R */
 	u32 hph_mode;
@@ -188,6 +194,8 @@ struct wcd9320_priv {
 	int power_active_ref;
 	int hph_l_gain;
 	int hph_r_gain;
+	/* speaker (SPKDRV) supply regulator, optional */
+	struct regulator *spkdrv_reg;
 };
 
 int wcd9320_regmap_register_patch(struct regmap *regmap, int version);

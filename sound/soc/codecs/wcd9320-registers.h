@@ -1648,6 +1648,7 @@
 
 /* SLIMBUS Slave Registers */
 #define WCD9320_SLIM_PGD_PORT_INT_EN0                     (0x30)
+#define WCD9320_SLIM_PGD_PORT_INT_TX_EN0                  (0x32)
 #define WCD9320_SLIM_PGD_PORT_INT_STATUS_RX_0             (0x34)
 #define WCD9320_SLIM_PGD_PORT_INT_STATUS_RX_1             (0x35)
 #define WCD9320_SLIM_PGD_PORT_INT_STATUS_TX_0             (0x36)
