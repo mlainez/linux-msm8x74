@@ -189,7 +189,6 @@ static const struct comp_sample_dependent_params comp_samp_params[] = {
 #define wcd9320_MCLK_CLK_9P6MHZ 9600000
 
 #define WCD9320_SLIM_NUM_PORT_REG 3
-#define WCD9320_SLIM_PGD_PORT_INT_TX_EN0 (WCD9320_SLIM_PGD_PORT_INT_EN0 + 2)
 #define BYTE_BIT_MASK(nr) (1 << ((nr) % BITS_PER_BYTE))
 
 #define SLIM_BW_CLK_GEAR_9 6200000
@@ -279,6 +278,39 @@ static struct interp_sample_rate compander_sample_rate_val[] = {
 	{48000, COMPANDER_FS_48KHZ},	/* 48K */
 	{96000, COMPANDER_FS_96KHZ},	/* 96K */
 	{192000, COMPANDER_FS_192KHZ},	/* 192K */
+};
+
+/*
+ * Diagnostic-only digital loopback TX channel: SLIM TX3 (0-indexed port 2),
+ * wired in DAPM to tap RX7 MIX1's output directly (no decimator), so a
+ * capture stream lets us check on real hardware whether data is actually
+ * flowing through the RX path that the loudspeaker/headphone overflow
+ * investigation could not otherwise observe.
+ *
+ * Sized to SLIM_MAX_TX_PORTS (16, see sound/soc/qcom/msm8974.c): the machine
+ * driver's set_channel_map() always passes tx_num=16, and
+ * mywcd_slim_init_slimslave() writes wcd->tx_chs[0..tx_num-1] unconditionally
+ * -- a smaller allocation here would be a heap buffer overflow. Only index 2
+ * (port 2 / "TX3") is ever added to an AIF's wcd_slim_ch_list, so the other
+ * entries are inert placeholders.
+ */
+static const struct wcd_slim_ch wcd9320_tx_chs[16] = {
+	WCD_SLIM_CH(0, 0),
+	WCD_SLIM_CH(1, 0),
+	WCD_SLIM_CH(2, 0),
+	WCD_SLIM_CH(3, 0),
+	WCD_SLIM_CH(4, 0),
+	WCD_SLIM_CH(5, 0),
+	WCD_SLIM_CH(6, 0),
+	WCD_SLIM_CH(7, 0),
+	WCD_SLIM_CH(8, 0),
+	WCD_SLIM_CH(9, 0),
+	WCD_SLIM_CH(10, 0),
+	WCD_SLIM_CH(11, 0),
+	WCD_SLIM_CH(12, 0),
+	WCD_SLIM_CH(13, 0),
+	WCD_SLIM_CH(14, 0),
+	WCD_SLIM_CH(15, 0),
 };
 
 static const struct wcd_slim_ch wcd9320_rx_chs[WCD9320_RX_MAX] = {
@@ -458,6 +490,21 @@ static int wcd9320_enable_mclk(struct wcd9320_priv *wcd)
 		usleep_range(50, 100);
 	}
 
+	/*
+	 * Select the 9.6MHz MCLK mode (CHIP_CTL bits[2:1] = 0x2; 0x0 would be
+	 * 12.288MHz). Our probe-time defaults-table write of this register
+	 * does not stick because it happens with the core clock off; assert
+	 * it here, after the MCLK buffers above are running, so it latches
+	 * (mirrors downstream, which sets these bits with the clock on,
+	 * gated on mclk_rate == 9.6MHz). Written unconditionally, not just
+	 * on the users==1 transition, to survive any clock-type transitions.
+	 * (CDC_CLK_POWER_CTL (0x314) is a read-only clock-domain power
+	 * STATUS register -- writes are ignored; it reads 0x03 once MCLK is
+	 * genuinely running, and was the key diagnostic for the dead-MCLK
+	 * pinctrl bug fixed in the board DT.)
+	 */
+	regmap_update_bits(wcd->regmap, WCD9320_A_CHIP_CTL, 0x06, 0x02);
+
 	wcd->clk_type = WCD_CLK_MCLK;
 
 	return 0;
@@ -601,9 +648,10 @@ static int slim_rx_mux_get(struct snd_kcontrol *kcontrol,
 
 	struct snd_soc_dapm_context *dapm = snd_soc_dapm_kcontrol_dapm(kcontrol);
 	struct snd_soc_component *component = snd_soc_dapm_to_component(dapm);
+	struct snd_soc_dapm_widget *widget = snd_soc_dapm_kcontrol_widget(kcontrol);
 	struct wcd9320_priv *wcd = dev_get_drvdata(component->dev);
 
-	ucontrol->value.enumerated.item[0] = wcd->rx_port_value;
+	ucontrol->value.enumerated.item[0] = wcd->rx_port_value[widget->shift];
 
 	return 0;
 }
@@ -638,10 +686,10 @@ static int slim_rx_mux_put(struct snd_kcontrol *kcontrol,
 	struct snd_soc_dapm_update *update = NULL;
 	u32 port_id = widget->shift;
 
-	wcd->rx_port_value = ucontrol->value.enumerated.item[0];
+	wcd->rx_port_value[port_id] = ucontrol->value.enumerated.item[0];
 
 	/* value need to match the Virtual port and AIF number */
-	switch (wcd->rx_port_value) {
+	switch (wcd->rx_port_value[port_id]) {
 	case 0:
 
 		list_del_init(&wcd->slim_data->rx_chs[port_id].list);
@@ -692,12 +740,12 @@ static int slim_rx_mux_put(struct snd_kcontrol *kcontrol,
 			      &wcd->dai[AIF_MIX1_PB].wcd_slim_ch_list);
 		break;
 	default:
-		dev_err(wcd->dev, "Unknown AIF %d\n", wcd->rx_port_value);
+		dev_err(wcd->dev, "Unknown AIF %d\n", wcd->rx_port_value[port_id]);
 		goto err;
 	}
 rtn:
 	snd_soc_dapm_mux_update_power(widget->dapm, kcontrol,
-					wcd->rx_port_value, e, update);
+					wcd->rx_port_value[port_id], e, update);
 
 	return 0;
 err:
@@ -711,6 +759,16 @@ static const struct snd_kcontrol_new slim_rx_mux[WCD9320_RX_MAX] = {
 	SOC_DAPM_ENUM_EXT("SLIM RX1 Mux", slim_rx_mux_enum,
 			  slim_rx_mux_get, slim_rx_mux_put),
 	SOC_DAPM_ENUM_EXT("SLIM RX2 Mux", slim_rx_mux_enum,
+			  slim_rx_mux_get, slim_rx_mux_put),
+	SOC_DAPM_ENUM_EXT("SLIM RX3 Mux", slim_rx_mux_enum,
+			  slim_rx_mux_get, slim_rx_mux_put),
+	SOC_DAPM_ENUM_EXT("SLIM RX4 Mux", slim_rx_mux_enum,
+			  slim_rx_mux_get, slim_rx_mux_put),
+	SOC_DAPM_ENUM_EXT("SLIM RX5 Mux", slim_rx_mux_enum,
+			  slim_rx_mux_get, slim_rx_mux_put),
+	SOC_DAPM_ENUM_EXT("SLIM RX6 Mux", slim_rx_mux_enum,
+			  slim_rx_mux_get, slim_rx_mux_put),
+	SOC_DAPM_ENUM_EXT("SLIM RX7 Mux", slim_rx_mux_enum,
 			  slim_rx_mux_get, slim_rx_mux_put),
 };
 
@@ -834,8 +892,6 @@ static int wcd9320_codec_enable_slim_chmask(struct wcd_slim_codec_dai_data *dai,
 	return ret;
 }
 
-static int wcd_slim_stream_enable(struct wcd_slim_data *wcd,
-			struct wcd_slim_codec_dai_data *dai_data);
 static int wcd_slim_stream_prepare(struct wcd9320_priv *wcd,
 	struct wcd_slim_codec_dai_data *dai_data);
 
@@ -860,11 +916,12 @@ static int wcd9320_codec_enable_slimrx(struct snd_soc_dapm_widget *w,
 		(void) wcd9320_codec_enable_slim_chmask(dai, true);
 		break;
 	case SND_SOC_DAPM_POST_PMD:
-
+		/*
+		 * The SLIM stream is torn down from .trigger STOP (mirroring
+		 * the activate-at-trigger ordering); only release the channel
+		 * mask bookkeeping here.
+		 */
 		wcd9320_codec_enable_slim_chmask(dai, false);
-		slim_stream_unprepare(dai->sruntime);
-		slim_stream_disable(dai->sruntime);
-
 		break;
 	}
 	return ret;
@@ -929,15 +986,10 @@ static int wcd9320_hph_pa_event(struct snd_soc_dapm_widget *w,
 {
 	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
 	struct wcd9320_priv *wcd = dev_get_drvdata(component->dev);
-	u8 req_clsh_state;
 	u32 pa_settle_time = WCD9320_HPH_PA_SETTLE_COMP_OFF;
 
 	pr_debug("%s: %s event = %d\n", __func__, w->name, event);
-	if (w->shift == 5) {
-		req_clsh_state = WCD_CLSH_STATE_HPHL;
-	} else if (w->shift == 4) {
-		req_clsh_state = WCD_CLSH_STATE_HPHR;
-	} else {
+	if (w->shift != 4 && w->shift != 5) {
 		pr_err("%s: Invalid w->shift %d\n", __func__, w->shift);
 		return -EINVAL;
 	}
@@ -954,10 +1006,7 @@ static int wcd9320_hph_pa_event(struct snd_soc_dapm_widget *w,
 		usleep_range(pa_settle_time, pa_settle_time + 1000);
 		pr_debug("%s: sleep %d us after %s PA enable\n", __func__,
 				pa_settle_time, w->name);
-		wcd_clsh_fsm(component, &wcd->clsh_d,
-						 CLSH_REQ_ENABLE,
-						 req_clsh_state,
-						 WCD_CLSH_EVENT_POST_PA);
+		/* supplies are managed by the HPH DAC PRE_DAC/POST_PA events */
 
 		break;
 
@@ -972,10 +1021,7 @@ static int wcd9320_hph_pa_event(struct snd_soc_dapm_widget *w,
 
 		/* Let MBHC module know PA turned off */
 
-		wcd_clsh_fsm(component, &wcd->clsh_d,
-						 CLSH_REQ_DISABLE,
-						 req_clsh_state,
-						 WCD_CLSH_EVENT_POST_PA);
+		/* supplies are managed by the HPH DAC PRE_DAC/POST_PA events */
 
 		break;
 	}
@@ -997,9 +1043,9 @@ static int wcd9320_codec_hphr_dac_event(struct snd_soc_dapm_widget *w,
 		snd_soc_component_update_bits(component, w->reg, 0x40, 0x40);
 
 		wcd_clsh_fsm(component, &wcd->clsh_d,
-			     WCD_CLSH_EVENT_PRE_DAC,
+			     CLSH_REQ_ENABLE,
 			     WCD_CLSH_STATE_HPHR,
-			     0);
+			     WCD_CLSH_EVENT_PRE_DAC);
 
 		break;
 	case SND_SOC_DAPM_POST_PMD:
@@ -1008,9 +1054,9 @@ static int wcd9320_codec_hphr_dac_event(struct snd_soc_dapm_widget *w,
 		snd_soc_component_update_bits(component, w->reg, 0x40, 0x00);
 
 		wcd_clsh_fsm(component, &wcd->clsh_d,
-			     WCD_CLSH_EVENT_POST_PA,
+			     CLSH_REQ_DISABLE,
 			     WCD_CLSH_STATE_HPHR,
-			     0);
+			     WCD_CLSH_EVENT_POST_PA);
 		break;
 	};
 
@@ -1031,18 +1077,18 @@ static int wcd9320_codec_hphl_dac_event(struct snd_soc_dapm_widget *w,
 		snd_soc_component_update_bits(component, WCD9320_A_CDC_CLK_RDAC_CLK_EN_CTL,
 				    0x02, 0x02);
 		wcd_clsh_fsm(component, &wcd->clsh_d,
-			     WCD_CLSH_EVENT_PRE_DAC,
+			     CLSH_REQ_ENABLE,
 			     WCD_CLSH_STATE_HPHL,
-			     0);
+			     WCD_CLSH_EVENT_PRE_DAC);
 
 		break;
 	case SND_SOC_DAPM_POST_PMD:
 		snd_soc_component_update_bits(component, WCD9320_A_CDC_CLK_RDAC_CLK_EN_CTL,
 				    0x02, 0x00);
 		wcd_clsh_fsm(component, &wcd->clsh_d,
-			     WCD_CLSH_EVENT_POST_PA,
+			     CLSH_REQ_DISABLE,
 			     WCD_CLSH_STATE_HPHL,
-			     0);
+			     WCD_CLSH_EVENT_POST_PA);
 		break;
 	};
 
@@ -1084,6 +1130,64 @@ static int wcd9320_codec_enable_interpolator(struct snd_soc_dapm_widget *w,
 	};
 
 	return 0;
+}
+
+static int wcd9320_codec_enable_spk_pa(struct snd_soc_dapm_widget *w,
+		struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		snd_soc_component_update_bits(component, WCD9320_A_SPKR_DRV_EN,
+			0x80, 0x80);
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		snd_soc_component_update_bits(component, WCD9320_A_SPKR_DRV_EN,
+			0x80, 0x00);
+		break;
+	}
+
+	return 0;
+}
+
+static int wcd9320_spk_dac_event(struct snd_soc_dapm_widget *w,
+		struct snd_kcontrol *kcontrol, int event)
+{
+	return 0;
+}
+
+static int wcd9320_codec_enable_vdd_spkr(struct snd_soc_dapm_widget *w,
+		struct snd_kcontrol *kcontrol, int event)
+{
+	struct snd_soc_component *component = snd_soc_dapm_to_component(w->dapm);
+	struct wcd9320_priv *wcd = dev_get_drvdata(component->dev);
+	int ret = 0;
+
+	WARN_ONCE(!wcd->spkdrv_reg, "SPKDRV supply isn't defined\n");
+
+	switch (event) {
+	case SND_SOC_DAPM_PRE_PMU:
+		if (wcd->spkdrv_reg) {
+			ret = regulator_enable(wcd->spkdrv_reg);
+			if (ret)
+				dev_err(component->dev,
+					"%s: Failed to enable spkdrv_reg\n",
+					__func__);
+		}
+		break;
+	case SND_SOC_DAPM_POST_PMD:
+		if (wcd->spkdrv_reg) {
+			ret = regulator_disable(wcd->spkdrv_reg);
+			if (ret)
+				dev_err(component->dev,
+					"%s: Failed to disable spkdrv_reg\n",
+					__func__);
+		}
+		break;
+	}
+
+	return ret;
 }
 
 static const char * const rx_cf_text[] = {
@@ -1200,6 +1304,34 @@ static const struct snd_soc_dapm_route wcd9320_audio_map[] = {
 
 	{"RX1 MIX1 INP1", "RX1", "SLIM RX1"},
 	{"RX2 MIX1 INP1", "RX2", "SLIM RX2"},
+
+	/* Speaker (RX7 / SPK) path */
+	{"SPK_OUT", NULL, "SPK PA"},
+	{"SPK PA", NULL, "SPK DAC"},
+	{"SPK DAC", NULL, "RX7 MIX2"},
+	{"SPK DAC", NULL, "VDD_SPKDRV"},
+	{"SPK DAC", NULL, "RX_BIAS"},
+
+	{"RX7 MIX2", NULL, "RX7 MIX1"},
+
+	{"RX7 MIX1", NULL, "RX7 MIX1 INP1"},
+	{"RX7 MIX1", NULL, "RX7 MIX1 INP2"},
+	{"AIF1 CAP", NULL, "RX7 MIX1"},
+
+	{"RX7 MIX1 INP1", "RX1", "SLIM RX1"},
+	{"RX7 MIX1 INP1", "RX2", "SLIM RX2"},
+	{"RX7 MIX1 INP1", "RX3", "SLIM RX3"},
+	{"RX7 MIX1 INP1", "RX4", "SLIM RX4"},
+	{"RX7 MIX1 INP1", "RX5", "SLIM RX5"},
+	{"RX7 MIX1 INP1", "RX6", "SLIM RX6"},
+	{"RX7 MIX1 INP1", "RX7", "SLIM RX7"},
+	{"RX7 MIX1 INP2", "RX1", "SLIM RX1"},
+	{"RX7 MIX1 INP2", "RX2", "SLIM RX2"},
+	{"RX7 MIX1 INP2", "RX3", "SLIM RX3"},
+	{"RX7 MIX1 INP2", "RX4", "SLIM RX4"},
+	{"RX7 MIX1 INP2", "RX5", "SLIM RX5"},
+	{"RX7 MIX1 INP2", "RX6", "SLIM RX6"},
+	{"RX7 MIX1 INP2", "RX7", "SLIM RX7"},
 };
 
 static const char * const rx_hph_mode_mux_text[] = {
@@ -1548,10 +1680,19 @@ static const struct soc_enum rx_mix1_inp1_chain_enum =
 static const struct soc_enum rx2_mix1_inp1_chain_enum =
 	SOC_ENUM_SINGLE(WCD9320_A_CDC_CONN_RX2_B1_CTL, 0, 12, rx_mix1_text);
 
+static const struct soc_enum rx7_mix1_inp1_chain_enum =
+	SOC_ENUM_SINGLE(WCD9320_A_CDC_CONN_RX7_B1_CTL, 0, 12, rx_mix1_text);
+static const struct soc_enum rx7_mix1_inp2_chain_enum =
+	SOC_ENUM_SINGLE(WCD9320_A_CDC_CONN_RX7_B1_CTL, 4, 12, rx_mix1_text);
+
 static const struct snd_kcontrol_new rx_mix1_inp1_mux =
 	SOC_DAPM_ENUM("RX1 MIX1 INP1 Mux", rx_mix1_inp1_chain_enum);
 static const struct snd_kcontrol_new rx2_mix1_inp1_mux =
 	SOC_DAPM_ENUM("RX2 MIX1 INP1 Mux", rx2_mix1_inp1_chain_enum);
+static const struct snd_kcontrol_new rx7_mix1_inp1_mux =
+	SOC_DAPM_ENUM("RX7 MIX1 INP1 Mux", rx7_mix1_inp1_chain_enum);
+static const struct snd_kcontrol_new rx7_mix1_inp2_mux =
+	SOC_DAPM_ENUM("RX7 MIX1 INP2 Mux", rx7_mix1_inp2_chain_enum);
 
 static const struct soc_enum class_h_dsm_enum =
 	SOC_ENUM_SINGLE(WCD9320_A_CDC_CONN_CLSH_CTL, 4, 3, class_h_dsm_text);
@@ -1576,20 +1717,33 @@ static const struct snd_soc_dapm_widget wcd9320_dapm_widgets[] = {
 				AIF3_PB, 0, wcd9320_codec_enable_slimrx,
 				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
 
-	SND_SOC_DAPM_MUX("SLIM RX1 MUX", SND_SOC_NOPM, WCD9320_RX1, 0,
+	/* Diagnostic-only RX7-MIX1 digital loopback capture (see wcd9320_tx_chs) */
+	SND_SOC_DAPM_AIF_OUT_E("AIF1 CAP", "AIF1 Capture", 0, SND_SOC_NOPM,
+				AIF1_CAP, 0, wcd9320_codec_enable_slimrx,
+				SND_SOC_DAPM_POST_PMU | SND_SOC_DAPM_POST_PMD),
+
+	/*
+	 * The SLIM RX port index (widget->shift) must start at WCD9320_RX0 so
+	 * "SLIM RX1 MUX" maps to rx_chs[0] = SLIM port 16 = hardware RX-mixer
+	 * input "RX1". The previous WCD9320_RX1.. base left port 16 unreachable
+	 * and put "SLIM RX1" on port 17 (hw input "RX2"), so the data arrived
+	 * on a port whose hw input never matched the RX7 MIX route/rate setup
+	 * -> the interpolator never drained it (port overflow, silence).
+	 */
+	SND_SOC_DAPM_MUX("SLIM RX1 MUX", SND_SOC_NOPM, WCD9320_RX0, 0,
+				&slim_rx_mux[WCD9320_RX0]),
+	SND_SOC_DAPM_MUX("SLIM RX2 MUX", SND_SOC_NOPM, WCD9320_RX1, 0,
 				&slim_rx_mux[WCD9320_RX1]),
-	SND_SOC_DAPM_MUX("SLIM RX2 MUX", SND_SOC_NOPM, WCD9320_RX2, 0,
+	SND_SOC_DAPM_MUX("SLIM RX3 MUX", SND_SOC_NOPM, WCD9320_RX2, 0,
 				&slim_rx_mux[WCD9320_RX2]),
-	SND_SOC_DAPM_MUX("SLIM RX3 MUX", SND_SOC_NOPM, WCD9320_RX3, 0,
+	SND_SOC_DAPM_MUX("SLIM RX4 MUX", SND_SOC_NOPM, WCD9320_RX3, 0,
 				&slim_rx_mux[WCD9320_RX3]),
-	SND_SOC_DAPM_MUX("SLIM RX4 MUX", SND_SOC_NOPM, WCD9320_RX4, 0,
+	SND_SOC_DAPM_MUX("SLIM RX5 MUX", SND_SOC_NOPM, WCD9320_RX4, 0,
 				&slim_rx_mux[WCD9320_RX4]),
-	SND_SOC_DAPM_MUX("SLIM RX5 MUX", SND_SOC_NOPM, WCD9320_RX5, 0,
+	SND_SOC_DAPM_MUX("SLIM RX6 MUX", SND_SOC_NOPM, WCD9320_RX5, 0,
 				&slim_rx_mux[WCD9320_RX5]),
-	SND_SOC_DAPM_MUX("SLIM RX6 MUX", SND_SOC_NOPM, WCD9320_RX6, 0,
+	SND_SOC_DAPM_MUX("SLIM RX7 MUX", SND_SOC_NOPM, WCD9320_RX6, 0,
 				&slim_rx_mux[WCD9320_RX6]),
-	SND_SOC_DAPM_MUX("SLIM RX7 MUX", SND_SOC_NOPM, WCD9320_RX7, 0,
-				&slim_rx_mux[WCD9320_RX7]),
 
 	SND_SOC_DAPM_MIXER("SLIM RX1", SND_SOC_NOPM, 0, 0, NULL, 0),
 	SND_SOC_DAPM_MIXER("SLIM RX2", SND_SOC_NOPM, 0, 0, NULL, 0),
@@ -1665,6 +1819,31 @@ static const struct snd_soc_dapm_widget wcd9320_dapm_widgets[] = {
 	SND_SOC_DAPM_SUPPLY("MCLK",  SND_SOC_NOPM, 0, 0,
 		wcd9320_codec_enable_mclk, SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
 
+	/* Speaker (RX7 / SPK) */
+	SND_SOC_DAPM_OUTPUT("SPK_OUT"),
+
+	SND_SOC_DAPM_PGA_E("SPK PA", SND_SOC_NOPM, 0, 0, NULL, 0,
+		wcd9320_codec_enable_spk_pa,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_DAC_E("SPK DAC", NULL, SND_SOC_NOPM, 0, 0,
+		wcd9320_spk_dac_event,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_SUPPLY("VDD_SPKDRV", SND_SOC_NOPM, 0, 0,
+		wcd9320_codec_enable_vdd_spkr,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMD),
+
+	SND_SOC_DAPM_MIXER("RX7 MIX1", SND_SOC_NOPM, 0, 0, NULL, 0),
+	SND_SOC_DAPM_MIXER_E("RX7 MIX2", WCD9320_A_CDC_CLK_RX_B1_CTL, 6, 0, NULL,
+		0, wcd9320_codec_enable_interpolator,
+		SND_SOC_DAPM_PRE_PMU | SND_SOC_DAPM_POST_PMU),
+
+	SND_SOC_DAPM_MUX("RX7 MIX1 INP1", SND_SOC_NOPM, 0, 0,
+		&rx7_mix1_inp1_mux),
+	SND_SOC_DAPM_MUX("RX7 MIX1 INP2", SND_SOC_NOPM, 0, 0,
+		&rx7_mix1_inp2_mux),
+
 };
 
 static int wcd9320_get_channel_map(const struct snd_soc_dai *dai,
@@ -1729,8 +1908,13 @@ static int mywcd_slim_init_slimslave(struct wcd_slim_data *wcd, u8 wcd_slim_pgd_
 	if (wcd->rx_chs) {
 		wcd->num_rx_port = rx_num;
 		for (i = 0; i < rx_num; i++) {
+			/*
+			 * Only refresh the channel number; the list node is
+			 * initialised once at probe and owned by the SLIM RX
+			 * mux, so re-initialising it here would tear the
+			 * channel back out of its AIF dai list.
+			 */
 			wcd->rx_chs[i].ch_num = rx_slot[i];
-			INIT_LIST_HEAD(&wcd->rx_chs[i].list);
 		}
 	} else {
 		pr_err("Not able to allocate memory for %d slimbus rx ports\n",
@@ -1741,7 +1925,6 @@ static int mywcd_slim_init_slimslave(struct wcd_slim_data *wcd, u8 wcd_slim_pgd_
 		wcd->num_tx_port = tx_num;
 		for (i = 0; i < tx_num; i++) {
 			wcd->tx_chs[i].ch_num = tx_slot[i];
-			INIT_LIST_HEAD(&wcd->tx_chs[i].list);
 		}
 	} else {
 		pr_err("Not able to allocate memory for %d slimbus tx ports\n",
@@ -1829,27 +2012,6 @@ static int wcd9320_set_interpolator_rate(struct snd_soc_dai *dai,
 	return 0;
 }
 
-static int wcd_slim_stream_enable(struct wcd_slim_data *wcd,
-			struct wcd_slim_codec_dai_data *dai_data)
-{
-	struct slim_stream_config *cfg = &dai_data->sconfig;
-	struct list_head *wcd_slim_ch_list = &dai_data->wcd_slim_ch_list;
-	u8  payload = 0;
-	struct wcd_slim_ch *rx;
-
-	cfg->ch_count = 0;
-	/* Configure slave interface device */
-	list_for_each_entry(rx, wcd_slim_ch_list, list) {
-		payload |= 1 << rx->shift;
-	}
-	if (!dai_data->sruntime)
-		pr_err("SLIM runtime is NULL...............................\n");
-
-	slim_stream_enable(dai_data->sruntime);
-
-	return 0;
-
-}
 
 static int wcd_slim_stream_prepare(struct wcd9320_priv *wcd,
 	struct wcd_slim_codec_dai_data *dai_data)
@@ -1867,6 +2029,18 @@ static int wcd_slim_stream_prepare(struct wcd9320_priv *wcd,
 	int i = 0;
 
 	cfg->ch_count = 0;
+	cfg->port_mask = 0;
+	/*
+	 * Direction is per-channel-list: RX channels (port >= 16) belong to
+	 * a playback AIF, TX channels (port < 16) to a capture AIF -- a
+	 * dai_data's wcd_slim_ch_list is never mixed. Peek the first entry.
+	 */
+	cfg->direction = SNDRV_PCM_STREAM_PLAYBACK;
+	if (!list_empty(wcd_slim_ch_list)) {
+		rx = list_first_entry(wcd_slim_ch_list, struct wcd_slim_ch, list);
+		if (rx->port < WCD9320_RX_PORT_START_NUMBER)
+			cfg->direction = SNDRV_PCM_STREAM_CAPTURE;
+	}
 	/* Configure slave interface device */
 	list_for_each_entry(rx, wcd_slim_ch_list, list) {
 		payload |= 1 << rx->shift;
@@ -1874,7 +2048,7 @@ static int wcd_slim_stream_prepare(struct wcd9320_priv *wcd,
 		cfg->ch_count++;
 
 	}
-
+	kfree(cfg->chs);
 	cfg->chs = kcalloc(cfg->ch_count, sizeof(unsigned int), GFP_KERNEL);
 	if (!cfg->chs)
 		return -ENOMEM;
@@ -1883,38 +2057,41 @@ static int wcd_slim_stream_prepare(struct wcd9320_priv *wcd,
 	cfg->bps = bit_width;
 	i = 0;
 	list_for_each_entry(rx, wcd_slim_ch_list, list) {
+		u16 ch_reg, cfg_reg;
+
 		codec_port = rx->port;
 		cfg->chs[i++] = rx->ch_num;
 
-		/* look for the valid port range and chose the
-		 * payload accordingly
-		 */
-		/* write to interface device */
-		ret = regmap_write(wcd_sd->if_regmap,
-				SB_PGD_RX_PORT_MULTI_CHANNEL_0(
-				wcd_sd->rx_port_ch_reg_base, codec_port),
-				payload);
+		if (cfg->direction == SNDRV_PCM_STREAM_CAPTURE) {
+			ch_reg = (codec_port < 8) ?
+				SB_PGD_TX_PORT_MULTI_CHANNEL_0(codec_port) :
+				SB_PGD_TX_PORT_MULTI_CHANNEL_1(codec_port);
+			cfg_reg = SB_PGD_PORT_CFG_BYTE_ADDR(
+				wcd_sd->port_tx_cfg_reg_base, codec_port);
+		} else {
+			ch_reg = SB_PGD_RX_PORT_MULTI_CHANNEL_0(
+				wcd_sd->rx_port_ch_reg_base, codec_port);
+			cfg_reg = SB_PGD_PORT_CFG_BYTE_ADDR(
+				wcd_sd->port_rx_cfg_reg_base, codec_port);
+		}
 
+		/* write to interface device */
+		ret = regmap_write(wcd_sd->if_regmap, ch_reg, payload);
 		if (ret < 0) {
 			pr_err("%s:Intf-dev fail reg[%d] payload[%d] ret[%d]\n",
-				__func__,
-				SB_PGD_RX_PORT_MULTI_CHANNEL_0(
-				wcd_sd->rx_port_ch_reg_base, codec_port),
-				payload, ret);
+				__func__, ch_reg, payload, ret);
 			return ret;
 		}
 		/* configure the slave port for water mark and enable*/
-		ret = regmap_write(wcd_sd->if_regmap,
-				SB_PGD_PORT_CFG_BYTE_ADDR(
-				wcd_sd->port_rx_cfg_reg_base, codec_port),
-				WATER_MARK_VAL);
+		ret = regmap_write(wcd_sd->if_regmap, cfg_reg, WATER_MARK_VAL);
 		if (ret < 0) {
 			pr_err("%s:watermark set failure for port[%d] ret[%d]",
 				__func__, codec_port, ret);
 		}
 	}
-	dai_data->sruntime = slim_stream_allocate(wcd->slim, "WCD9320-SLIM");
-	slim_stream_prepare(dai_data->sruntime, cfg);
+	if (!dai_data->sruntime)
+		dai_data->sruntime = slim_stream_allocate(wcd->slim,
+							  "WCD9320-SLIM");
 
 	return 0;
 
@@ -1925,13 +2102,139 @@ static int wcd9320_prepare(struct snd_pcm_substream *substream,
 {
 
 	struct wcd9320_priv *wcd = snd_soc_component_get_drvdata(dai->component);
+	struct wcd_slim_codec_dai_data *dai_data = &wcd->dai[dai->id];
 
 	if ((substream->stream == SNDRV_PCM_STREAM_PLAYBACK) &&
 	    test_bit(SB_CLK_GEAR, &wcd->status_mask)) {
 		wcd9320_codec_vote_max_bw(dai->component, false);
 		clear_bit(SB_CLK_GEAR, &wcd->status_mask);
 	}
-	wcd_slim_stream_enable(wcd->slim_data, &wcd->dai[dai->id]);
+
+	/*
+	 * SLIM channel setup intentionally does NOT happen here: .prepare
+	 * fires before DAPM has powered the interpolator clock (verified on
+	 * hardware: CDC_CLK_RX_B1_CTL reads 0x0 at this point). Channel
+	 * setup lives in .trigger START (see wcd9320_trigger), where the
+	 * clock is reliably on and the q6afe producer has been started.
+	 */
+	(void)dai_data;
+
+	return 0;
+}
+
+/*
+ * Activate the SLIM data channels from .trigger START, i.e. AFTER the q6afe
+ * RX producer has been started by the backend trigger. Activating earlier
+ * (in .prepare / DAPM POST_PMU) makes the ADSP framer see an active channel
+ * with no bound source ("empty reconfiguration") so no audio is deposited and
+ * the codec RX port underflows -> silence. This mirrors the wcd9335 ordering.
+ */
+static int wcd9320_trigger(struct snd_pcm_substream *substream, int cmd,
+			   struct snd_soc_dai *dai)
+{
+	struct wcd9320_priv *wcd = snd_soc_component_get_drvdata(dai->component);
+	struct wcd_slim_codec_dai_data *dai_data = &wcd->dai[dai->id];
+	unsigned int en = 0;
+	int i;
+
+	switch (cmd) {
+	case SNDRV_PCM_TRIGGER_START:
+	case SNDRV_PCM_TRIGGER_RESUME:
+	case SNDRV_PCM_TRIGGER_PAUSE_RELEASE:
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			regmap_read(wcd->regmap, WCD9320_A_CDC_CLK_RX_B1_CTL, &en);
+			en &= 0x7f;
+			/*
+			 * Pull the active interpolator(s)' digital volume to
+			 * the -84dB floor across stream start: the samples
+			 * that reach the RX path between slim_stream_enable()
+			 * and the interpolator reset pulse below otherwise
+			 * play as a short burst of garbage (audible crackle
+			 * right before the stream). Restored below after the
+			 * reset has taken and the garbage flushed.
+			 */
+			for (i = 0; i < WCD9320_NUM_INTERPOLATORS; i++)
+				if (en & BIT(i))
+					regmap_write(wcd->regmap,
+						rx_digital_gain_reg[i],
+						(u8)-84);
+			/*
+			 * Take the speaker PA off the line for the reset
+			 * pulse below: resetting the interpolator steps the
+			 * DAC output, which the digital volume floor cannot
+			 * attenuate (it is upstream of the DAC). Measured on
+			 * hardware (mic capture): a single ~8ms impulse ~4x
+			 * louder than the tone, exactly at the reset, ~18ms
+			 * before audio. Re-enabled below once everything has
+			 * settled with the gain still floored.
+			 */
+			regmap_update_bits(wcd->regmap, WCD9320_A_SPKR_DRV_EN,
+					   0x80, 0x00);
+		}
+		/*
+		 * Re-write the codec-side SLIM port config (channel map +
+		 * watermark/enable) on EVERY stream start, not just the
+		 * first: the port state does not survive a stream stop, and
+		 * the working downstream stack re-issues these writes on
+		 * every playback (mirrors upstream wcd9335, whose
+		 * slim_set_hw_params runs on every hw_params call).
+		 */
+		wcd_slim_stream_prepare(wcd, dai_data);
+		slim_stream_prepare(dai_data->sruntime, &dai_data->sconfig);
+		slim_stream_enable(dai_data->sruntime);
+		/*
+		 * Kick the active RX interpolator(s) with a reset pulse now
+		 * that the SLIM channel is live. DAPM already pulsed
+		 * CDC_CLK_RX_RESET when the interpolator widget powered up,
+		 * but that happens before the ADSP starts depositing data on
+		 * the bus; the interpolator needs a reset while clock AND
+		 * data are both active to start draining the port FIFO.
+		 * Removing this re-pulse regressed audible output to silence.
+		 */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			if (en) {
+				regmap_update_bits(wcd->regmap,
+					WCD9320_A_CDC_CLK_RX_RESET_CTL, en, en);
+				regmap_update_bits(wcd->regmap,
+					WCD9320_A_CDC_CLK_RX_RESET_CTL, en, 0);
+			}
+			/* let the start-of-stream garbage flush */
+			msleep(20);
+			/* PA back on while the input is settled and floored */
+			regmap_update_bits(wcd->regmap, WCD9320_A_SPKR_DRV_EN,
+					   0x80, 0x80);
+			usleep_range(2000, 2500);
+			for (i = 0; i < WCD9320_NUM_INTERPOLATORS; i++)
+				if (en & BIT(i))
+					regmap_write(wcd->regmap,
+						rx_digital_gain_reg[i], 0);
+		}
+		break;
+	case SNDRV_PCM_TRIGGER_STOP:
+	case SNDRV_PCM_TRIGGER_SUSPEND:
+	case SNDRV_PCM_TRIGGER_PAUSE_PUSH:
+		/*
+		 * Pull the digital volume to the floor before tearing the
+		 * SLIM stream down: this trigger runs while the analog PA is
+		 * still powered (DAPM powers down afterwards), so the
+		 * momentary underflow when the channel dies otherwise pops
+		 * out of the speaker. Downstream avoids this by closing the
+		 * SLIM channel from the AIF widget's POST_PMD, after the PA
+		 * is already off. The next stream start restores the gain.
+		 */
+		if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+			regmap_read(wcd->regmap, WCD9320_A_CDC_CLK_RX_B1_CTL, &en);
+			en &= 0x7f;
+			for (i = 0; i < WCD9320_NUM_INTERPOLATORS; i++)
+				if (en & BIT(i))
+					regmap_write(wcd->regmap,
+						rx_digital_gain_reg[i],
+						(u8)-84);
+		}
+		slim_stream_disable(dai_data->sruntime);
+		slim_stream_unprepare(dai_data->sruntime);
+		break;
+	}
 
 	return 0;
 }
@@ -1962,15 +2265,38 @@ static int wcd9320_hw_params(struct snd_pcm_substream *substream,
 		}
 		wcd->dai[dai->id].rate = params_rate(params);
 		break;
+	case SNDRV_PCM_STREAM_CAPTURE:
+		/*
+		 * Diagnostic-only TX3/RX7-loopback DAI: no interpolator rate
+		 * to set (it taps a fixed digital point, not a decimator).
+		 */
+		switch (params_width(params)) {
+		case 16:
+			wcd->dai[dai->id].bit_width = 16;
+			break;
+		case 24:
+			wcd->dai[dai->id].bit_width = 24;
+			break;
+		}
+		wcd->dai[dai->id].rate = params_rate(params);
+		break;
 	default:
 		dev_err(wcd->dev, "Invalid stream type %d\n",
 			substream->stream);
 		return -EINVAL;
 	};
-	wcd_slim_stream_prepare(wcd, &wcd->dai[dai->id]);
-
-	snd_soc_component_update_bits(component, WCD9320_A_CDC_CONN_RX_SB_B1_CTL, 0xff, 0x02);
-	snd_soc_component_update_bits(component, WCD9320_A_CDC_CONN_RX_SB_B1_CTL, 0xff, 0x0a);
+	/*
+	 * Select the sample format on the SLIM-port -> RX sideband bus.
+	 * Each RX SB port has a 2-bit field in CONN_RX_SB_B1/B2_CTL
+	 * (field_shift = port * 2); 0x2 = 16-bit, 0x0 = 24-bit. We carry a
+	 * single channel on codec port 16 = RX SB port 0 (shift 0), matching
+	 * downstream taiko_set_rxsb_port_format() and the working reference's
+	 * live value (0x3AE = 0x02 for 16-bit playback).
+	 */
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK)
+		snd_soc_component_update_bits(component,
+			WCD9320_A_CDC_CONN_RX_SB_B1_CTL, 0x03,
+			wcd->dai[dai->id].bit_width == 16 ? 0x02 : 0x00);
 	return 0;
 }
 
@@ -1982,6 +2308,7 @@ static int wcd9320_set_dai_fmt(struct snd_soc_dai *dai, unsigned int fmt)
 static const struct snd_soc_dai_ops wcd9320_dai_ops = {
 	.hw_params = wcd9320_hw_params,
 	.prepare = wcd9320_prepare,
+	.trigger = wcd9320_trigger,
 	.set_fmt = wcd9320_set_dai_fmt,
 	.set_channel_map = wcd9320_set_channel_map,
 	.get_channel_map = wcd9320_get_channel_map,
@@ -1999,6 +2326,26 @@ static struct snd_soc_dai_driver wcd9320_slim_dai[] = {
 			.rate_min = 8000,
 			.channels_min = 1,
 			.channels_max = 2,
+		},
+		.ops = &wcd9320_dai_ops,
+	},
+	[1] = {
+		/*
+		 * Diagnostic-only capture DAI: digital loopback tapping
+		 * RX7 MIX1's output via the SLIM TX3 sideband mux, to check
+		 * whether RX playback data physically reaches the codec's
+		 * digital core (see the loudspeaker-silence investigation).
+		 */
+		.name = "wcd9320_tx3_loopback",
+		.id = AIF1_CAP,
+		.capture = {
+			.stream_name = "AIF1 Capture",
+			.rates = WCD9320_RATES,
+			.formats = WCD9320_FORMATS_S16_S24_LE,
+			.rate_max = 192000,
+			.rate_min = 8000,
+			.channels_min = 1,
+			.channels_max = 1,
 		},
 		.ops = &wcd9320_dai_ops,
 	},
@@ -2327,6 +2674,17 @@ static int wcd9320_codec_probe(struct snd_soc_component *component)
 		init_waitqueue_head(&wcd->dai[i].dai_wait);
 	}
 
+	/*
+	 * Diagnostic-only digital loopback: always carry the single TX3
+	 * channel on AIF1 CAP (no selectable mux/kcontrol -- this capture
+	 * path exists purely to check whether RX7 MIX1's data is reaching
+	 * the codec's digital core, for the loudspeaker-silence investigation).
+	 */
+	list_add_tail(&wcd->slim_data->tx_chs[2].list,
+		      &wcd->dai[AIF1_CAP].wcd_slim_ch_list);
+	/* Tap RX1 MIX1 (RMIX1) onto the loopback TX channel. */
+	snd_soc_component_write(component, WCD9320_A_CDC_CONN_TX_SB_B3_CTL, 0x01);
+
 	return 0;
 }
 
@@ -2350,7 +2708,7 @@ static int wcd9320_probe(struct platform_device *pdev)
 {
 	struct wcd9320 *control = dev_get_drvdata(pdev->dev.parent);
 	struct device *dev = &pdev->dev;
-	int ret = 0;
+	int ret = 0, i;
 	struct wcd9320_priv *wcd;
 
 	wcd = devm_kzalloc(dev, sizeof(*wcd), GFP_KERNEL);
@@ -2364,6 +2722,16 @@ static int wcd9320_probe(struct platform_device *pdev)
 		return -ENOMEM;
 
 	memcpy(wcd->slim_data->rx_chs, wcd9320_rx_chs, sizeof(wcd9320_rx_chs));
+	for (i = 0; i < ARRAY_SIZE(wcd9320_rx_chs); i++)
+		INIT_LIST_HEAD(&wcd->slim_data->rx_chs[i].list);
+
+	wcd->slim_data->tx_chs = devm_kzalloc(dev, sizeof(wcd9320_tx_chs), GFP_KERNEL);
+	if (!wcd->slim_data->tx_chs)
+		return -ENOMEM;
+
+	memcpy(wcd->slim_data->tx_chs, wcd9320_tx_chs, sizeof(wcd9320_tx_chs));
+	for (i = 0; i < ARRAY_SIZE(wcd9320_tx_chs); i++)
+		INIT_LIST_HEAD(&wcd->slim_data->tx_chs[i].list);
 
 	dev_set_drvdata(dev, wcd);
 
@@ -2379,6 +2747,11 @@ static int wcd9320_probe(struct platform_device *pdev)
 	mutex_init(&wcd->codec_bg_clk_lock);
 	mutex_init(&wcd->master_bias_lock);
 	set_bit(AUDIO_NOMINAL, &wcd->status_mask);
+
+	/* Speaker driver supply is optional */
+	wcd->spkdrv_reg = devm_regulator_get_optional(dev, "cdc-vdd-spkdrv");
+	if (IS_ERR(wcd->spkdrv_reg))
+		wcd->spkdrv_reg = NULL;
 
 	ret = snd_soc_register_component(dev, &wcd9320_component_drv,
 					 wcd9320_slim_dai,

@@ -1430,16 +1430,39 @@ static bool wcd9320_is_volatile_register(struct device *dev, unsigned int reg)
 	return 0;
 }
 
+/*
+ * The WCD9320 (Taiko) SLIMbus value elements live at a fixed 0x800 offset
+ * from the logical register address (confirmed on hardware: the chip-ID
+ * bytes and SPKR_DRV_EN POR only read correctly at element 0x800+reg).
+ * Map the whole register space into a single window so regmap accesses the
+ * correct elements; the entire range fits in one window so the page selector
+ * is always 0.
+ */
 const struct regmap_config wcd9320_regmap_config = {
 	.reg_bits = 16,
 	.val_bits = 8,
-	.cache_type = REGCACHE_RBTREE,
-	.reg_defaults = wcd9320_defaults,
-	.num_reg_defaults = ARRAY_SIZE(wcd9320_defaults),
-	.max_register = WCD9320_CACHE_SIZE,
+	/*
+	 * No register cache during bring-up: the WCD9320 has clock/power-gated
+	 * register domains, so a cached write whose value matches a stale
+	 * default would be skipped and never reach hardware once the domain is
+	 * finally clocked. REGCACHE_NONE forces every write to the codec and
+	 * every read to reflect true hardware state.
+	 */
+	.cache_type = REGCACHE_NONE,
+	/*
+	 * The codec's value elements live at a flat 0x800 offset on the SLIM
+	 * bus (element = 0x800 + reg). Model that with reg_base, NOT with a
+	 * regmap_range_cfg paging window: a selector_reg of 0x800 aliases
+	 * codec register 0x000 (CHIP_CTL), so every regmap "page select"
+	 * read-modify-write silently forced CHIP_CTL back to 0x00
+	 * (12.288MHz MCLK mode) the moment any other register was accessed
+	 * after CHIP_CTL was set to 0x02 (9.6MHz mode). Running the digital
+	 * core in 12.288MHz mode from a 9.6MHz MCLK made the RX interpolator
+	 * consume ~22% slow, continuously dropping samples at the SLIM RX
+	 * port (persistent overflow) and reducing all playback to crackle.
+	 */
+	.reg_base = 0x800,
+	.max_register = WCD9320_MAX_REGISTER,
 	.volatile_reg = wcd9320_is_volatile_register,
 	.readable_reg = wcd9320_is_readable_register,
-//	.can_multi_write = true,
-	//.ranges = wcd9320_ranges,
-	//.num_ranges = ARRAY_SIZE(wcd9320_ranges),
 };
