@@ -189,7 +189,16 @@ static int msm8974_be_hw_params_fixup(struct snd_soc_pcm_runtime *rtd,
 	struct snd_mask *fmt = hw_param_mask(params, SNDRV_PCM_HW_PARAM_FORMAT);
 
 	rate->min = rate->max = DEFAULT_SAMPLE_RATE_48K;
-	channels->min = channels->max = 2;
+	/*
+	 * The wcd9320 codec provisions a single SLIM data channel per
+	 * direction (RX ch 144 for playback); the working downstream stack
+	 * runs this backend at num_ch 1 (taiko_hw_params: "num_ch 1"). Forcing
+	 * the AFE port to 2 channels while the bus carries one channel's worth
+	 * of slots makes the ADSP push twice the provisioned data rate onto
+	 * the SLIM channel -> continuous corruption (crackle). Match the
+	 * codec's channel allocation.
+	 */
+	channels->min = channels->max = 1;
 	snd_mask_set_format(fmt, SNDRV_PCM_FORMAT_S16_LE);
 
 	return 0;
