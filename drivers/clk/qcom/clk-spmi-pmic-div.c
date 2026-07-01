@@ -243,13 +243,21 @@ static int spmi_pmic_clkdiv_probe(struct platform_device *pdev)
 	cxo_hz = clk_get_rate(cxo);
 	clk_put(cxo);
 
-	init.name = name;
 	init.parent_data = &parent_data;
 	init.num_parents = 1;
 	init.ops = &clk_spmi_pmic_div_ops;
 
 	for (i = 0, clkdiv = cc->clks; i < nclks; i++) {
-		snprintf(name, sizeof(name), "div_clk%d", i + 1);
+		/*
+		 * Allow the board to name the outputs to avoid clashing with
+		 * other global "div_clkN" clocks (e.g. the RPM clocks on
+		 * MSM8974), falling back to the legacy generic names.
+		 */
+		if (of_property_read_string_index(of_node, "clock-output-names",
+						  i, &init.name)) {
+			snprintf(name, sizeof(name), "div_clk%d", i + 1);
+			init.name = name;
+		}
 
 		spin_lock_init(&clkdiv[i].lock);
 		clkdiv[i].base = start + i * 0x100;
