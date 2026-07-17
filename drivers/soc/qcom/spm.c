@@ -505,9 +505,8 @@ enable_avs_v2_1:
 static void smp_set_vdd_v2_1_l2(void *data)
 {
 	struct spm_driver_data *drv = data;
-	unsigned int vctl, avs_ctl;
-	unsigned int vlevel, volt_sel, old_vlevel;
-	unsigned int delay_us, steps;
+	unsigned int vctl, avs_ctl, pmic_sts;
+	unsigned int vlevel, volt_sel;
 	bool avs_enabled;
 
 	volt_sel = drv->volt_sel;
@@ -524,7 +523,6 @@ static void smp_set_vdd_v2_1_l2(void *data)
 	spm_register_write(drv, SPM_REG_RST, 1);
 
 	vctl = spm_register_read(drv, SPM_REG_VCTL);
-	old_vlevel = vctl & SPM_2_1_VCTL_VLVL;
 
 	/*
 	 * PORT must be 0 (the vctl port): nonzero ports route the data byte
@@ -536,20 +534,17 @@ static void smp_set_vdd_v2_1_l2(void *data)
 
 	spm_register_write(drv, SPM_REG_VCTL, vctl);
 
-	/* Ensure all register writes are visible to hardware */
-	mb();
-
 	/*
-	 * Time-based settling instead of PMIC_STS polling.
-	 * Each vlevel step = 5000 uV, ramp rate = 1250 uV/us -> 4 us/step.
-	 * Use 2x margin and a 20 us floor for SAW2 command overhead.
+	 * Wait for the PMIC arbiter to latch the new setpoint.  The analog
+	 * ramp is waited out by the regulator core via ramp_delay.
 	 */
-	steps = (vlevel > old_vlevel) ? (vlevel - old_vlevel) :
-					(old_vlevel - vlevel);
-	delay_us = steps * 4 * 2;
-	if (delay_us < 20)
-		delay_us = 20;
-	udelay(delay_us);
+	if (read_poll_timeout_atomic(spm_register_read,
+				     pmic_sts,
+				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
+				     1, 200, false,
+				     drv, SPM_REG_PMIC_STS))
+		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
+				    pmic_sts & 0xff, vlevel);
 
 	if (avs_enabled) {
 		unsigned int max_avs = volt_sel;
