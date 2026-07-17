@@ -522,7 +522,12 @@ static void smp_set_vdd_v2_1_l2(void *data)
 	vctl = spm_register_read(drv, SPM_REG_VCTL);
 	old_vlevel = vctl & SPM_2_1_VCTL_VLVL;
 
-	vctl &= ~SPM_2_1_VCTL_VLVL;
+	/*
+	 * PORT must be 0 (the vctl port): nonzero ports route the data byte
+	 * to the PMIC phase/PFM controls instead of the voltage setpoint,
+	 * and PMIC_STS only reflects writes made through port 0.
+	 */
+	vctl &= ~(SPM_2_1_VCTL_VLVL | SPM_2_1_VCTL_PORT);
 	vctl |= vlevel;
 
 	spm_register_write(drv, SPM_REG_VCTL, vctl);
