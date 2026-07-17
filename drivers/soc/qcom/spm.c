@@ -222,8 +222,12 @@ static void smp_set_vdd_v2_1(void *data);
 static struct linear_range spm_v1_1_regulator_range =
 	REGULATOR_LINEAR_RANGE(700000, 0, 56, 12500);
 
+/*
+ * The selector written to VCTL[7:0] is the raw FTS2 setpoint, zero-based
+ * from 0 V in 5 mV steps; the usable range is 350 mV (70) to 1.275 V (255).
+ */
 static struct linear_range spm_v2_1_regulator_range =
-	REGULATOR_LINEAR_RANGE(350000, 0, 185, 5000);
+	REGULATOR_LINEAR_RANGE(350000, 70, 255, 5000);
 
 /* SPM register data for 8974, 8084 per-CPU (no voltage control - L2 master handles it) */
 static const struct spm_reg_data spm_reg_8974_8084_cpu  = {
