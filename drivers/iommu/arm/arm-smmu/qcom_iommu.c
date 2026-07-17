@@ -111,8 +111,6 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 	return readq_relaxed(ctx->base + reg);
 }
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
-
 static void qcom_iommu_tlb_sync(void *cookie)
 {
 	struct qcom_iommu_domain *qcom_domain = cookie;
@@ -256,7 +254,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
-		if (!ctx->secure_init && qcom_iommu_has_secure_context(qcom_iommu)) {
+		if (!ctx->secure_init) {
 			ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, ctx->asid);
 			if (ret) {
 				dev_err(qcom_iommu->dev, "secure init failed: %d\n", ret);
@@ -876,7 +874,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		goto err_pm_disable;
 	}
 
-	if (qcom_iommu->local_base && qcom_iommu_has_secure_context(qcom_iommu)) {
+	if (qcom_iommu->local_base) {
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
 			goto err_pm_disable;
@@ -910,7 +908,7 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	if (ret < 0)
 		return ret;
 
-	if (dev->pm_domain && qcom_iommu_has_secure_context(qcom_iommu))
+	if (dev->pm_domain)
 		return qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
 
 	return ret;

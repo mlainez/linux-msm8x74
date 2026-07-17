@@ -2137,17 +2137,17 @@
 			#size-cells = <1>;
 			#iommu-cells = <1>;
 			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
-			reg = <0xfd928000 0x10000>;
-			ranges;
+			ranges = <0 0xfd928000 0x10000>;
 			clocks = <&mmcc MDSS_AHB_CLK>,
 				 <&mmcc MDSS_AXI_CLK>;
 			clock-names = "iface", "bus";
+			power-domains = <&mmcc MDSS_GDSC>;
 			qcom,iommu-secure-id = <1>;
 
-			/* mdp_0 non-secure context bank */
-			iommu-ctx@fd930000 {
+			/* mdp_0 non-secure context bank (asid 8) */
+			iommu-ctx@8000 {
 				compatible = "qcom,msm-iommu-v1-ns";
-				reg = <0xfd930000 0x1000>;
+				reg = <0x8000 0x1000>;
 				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
 			};
 		};
@@ -2234,10 +2234,10 @@
 			#iommu-cells = <1>;
 			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
 			ranges = <0 0xfdb18000 0x10000>;
-			reg = <0xfdb10000 0x10000>;
 			clocks = <&mmcc OXILICX_AHB_CLK>,
 				 <&mmcc OXILICX_AXI_CLK>;
 			clock-names = "iface", "bus";
+			power-domains = <&mmcc OXILICX_GDSC>;
 			qcom,iommu-secure-id = <18>;
 
 			/* GFX3D_USER */
@@ -2290,10 +2290,10 @@
 			#iommu-cells = <1>;
 			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
 			ranges = <0 0xfdc84000 0x10000>;
-			reg = <0xfdc84000 0x10000>;
 			clocks = <&mmcc VENUS0_AHB_CLK>,
 				 <&mmcc VENUS0_AXI_CLK>;
 			clock-names = "iface", "bus";
+			power-domains = <&mmcc VENUS0_GDSC>;
 			qcom,iommu-secure-id = <0>;
 
 			/* venus_ns non-secure context bank */
