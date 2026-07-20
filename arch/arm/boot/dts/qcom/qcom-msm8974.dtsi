@@ -2244,9 +2244,14 @@
 			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
 			ranges = <0 0xfdb18000 0x10000>;
 			clocks = <&mmcc OXILICX_AHB_CLK>,
-				 <&mmcc OXILICX_AXI_CLK>;
-			clock-names = "iface", "bus";
+				 <&mmcc OXILICX_AXI_CLK>,
+				 <&mmcc OXILI_GFX3D_CLK>;
+			clock-names = "iface", "bus", "tbu";
 			power-domains = <&mmcc OXILICX_GDSC>;
+			/* Vote the MMSS<->EBI path before touching the SMMU. */
+			interconnects = <&mmssnoc MNOC_MAS_GRAPHICS_3D
+					 &bimc BIMC_SLV_EBI_CH0>;
+			interconnect-names = "mmss-ebi";
 			/*
 			 * The Adreno GPU SMMU is non-secure: HLOS programs the stream
 			 * mapping and page tables directly, with no TrustZone path.

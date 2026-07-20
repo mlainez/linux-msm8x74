@@ -20,6 +20,7 @@
 #include <linux/iopoll.h>
 #include <linux/kconfig.h>
 #include <linux/init.h>
+#include <linux/interconnect.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -48,6 +49,14 @@ struct qcom_iommu_dev {
 	struct iommu_device	 iommu;
 	struct device		*dev;
 	struct clk_bulk_data clks[CLK_NUM];
+	/*
+	 * MMSS<->EBI interconnect path. Present only on SoCs (e.g. MSM8974)
+	 * whose IOMMU sits behind the multimedia NoC: the SMMU AXI path must
+	 * be voted up before any register access, or the un-arbitrated access
+	 * faults the NoC and resets the SoC. NULL when the DT has no
+	 * "interconnects" property (all other SoCs -- behaviour unchanged).
+	 */
+	struct icc_path		*icc_path;
 	void __iomem		*local_base;
 	u32			 sec_id;
 	u8			 max_asid;
@@ -838,10 +847,26 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	}
 	qcom_iommu->clks[CLK_TBU].clk = clk;
 
+	/*
+	 * Optional MMSS<->EBI interconnect. of_icc_get() returns NULL when the
+	 * node has no "interconnects" property, so this is a no-op everywhere
+	 * except SoCs that need the bus vote (MSM8974).
+	 */
+	qcom_iommu->icc_path = devm_of_icc_get(dev, NULL);
+	if (IS_ERR(qcom_iommu->icc_path))
+		return dev_err_probe(dev, PTR_ERR(qcom_iommu->icc_path),
+				     "failed to get interconnect path\n");
+
 	if (of_property_read_u32(dev->of_node, "qcom,iommu-secure-id",
 				 &qcom_iommu->sec_id)) {
-		dev_err(dev, "missing qcom,iommu-secure-id property\n");
-		return -ENODEV;
+		/*
+		 * A non-secure IOMMU (e.g. the MSM8974 GPU/Venus SMMUs) has no
+		 * TrustZone-owned stream mapping: HLOS programs it directly and
+		 * no restore_sec_cfg()/secure page-table pool is needed. All
+		 * secure-only paths below are gated by
+		 * qcom_iommu_has_secure_context(), so sec_id stays unused here.
+		 */
+		qcom_iommu->sec_id = -1;
 	}
 
 	if (qcom_iommu_has_secure_context(qcom_iommu)) {
@@ -906,13 +931,36 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
 	int ret;
 
+	/*
+	 * Vote the MMSS<->EBI interconnect up before enabling clocks or
+	 * touching any SMMU register. On MSM8974 the SMMU's AXI master is
+	 * otherwise un-arbitrated on the multimedia NoC and the first
+	 * register access raises a NoC/xPU error that resets the SoC. No-op
+	 * where icc_path is NULL (SoCs without an "interconnects" property).
+	 */
+	if (qcom_iommu->icc_path) {
+		ret = icc_set_bw(qcom_iommu->icc_path, 0, MBps_to_icc(150));
+		if (ret)
+			return ret;
+	}
+
 	ret = clk_bulk_prepare_enable(CLK_NUM, qcom_iommu->clks);
 	if (ret < 0)
-		return ret;
+		goto err_icc;
 
-	if (dev->pm_domain && qcom_iommu_has_secure_context(qcom_iommu))
-		return qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
+	if (dev->pm_domain && qcom_iommu_has_secure_context(qcom_iommu)) {
+		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
+		if (ret)
+			goto err_clk;
+	}
 
+	return 0;
+
+err_clk:
+	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
+err_icc:
+	if (qcom_iommu->icc_path)
+		icc_set_bw(qcom_iommu->icc_path, 0, 0);
 	return ret;
 }
 
@@ -921,6 +969,8 @@ static int __maybe_unused qcom_iommu_suspend(struct device *dev)
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
 
 	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
+	if (qcom_iommu->icc_path)
+		icc_set_bw(qcom_iommu->icc_path, 0, 0);
 
 	return 0;
 }
