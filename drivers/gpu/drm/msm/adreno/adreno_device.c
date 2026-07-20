@@ -241,13 +241,17 @@ static const struct component_ops a3xx_ops = {
 	.unbind = adreno_unbind,
 };
 
-static void adreno_device_register_headless(void)
+static void adreno_device_register_headless(struct device *parent)
 {
 	/* on imx5, we don't have a top-level mdp/dpu node
 	 * this creates a dummy node for the driver for that case
+	 *
+	 * Pass the GPU as parent so msm_use_mmu() sees an IOMMU-mapped
+	 * parent (device_iommu_mapped) and the GPU allocates through its
+	 * IOMMU instead of falling back to a VRAM carveout.
 	 */
 	struct platform_device_info dummy_info = {
-		.parent = NULL,
+		.parent = parent,
 		.name = "msm",
 		.id = -1,
 		.res = NULL,
@@ -269,7 +273,7 @@ static int adreno_probe(struct platform_device *pdev)
 		return ret;
 
 	if (of_device_is_compatible(pdev->dev.of_node, "amd,imageon"))
-		adreno_device_register_headless();
+		adreno_device_register_headless(&pdev->dev);
 
 	return 0;
 }
