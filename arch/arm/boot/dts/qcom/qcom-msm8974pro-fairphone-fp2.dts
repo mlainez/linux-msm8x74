@@ -139,6 +139,14 @@
 };
 
 &gpu {
+	/*
+	 * Headless: the display is disabled, so no MDP/DPU top-level node
+	 * creates the DRM master. Appending "amd,imageon" makes the adreno
+	 * driver spin up the dummy "msm" master (parented to the GPU, so it
+	 * uses the GPU IOMMU rather than a VRAM carveout). The chip is still
+	 * identified from its HW chip-id register, not this string.
+	 */
+	compatible = "qcom,adreno-330.1", "qcom,adreno", "amd,imageon";
 	status = "okay";
 };
 
