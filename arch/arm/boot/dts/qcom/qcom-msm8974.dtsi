@@ -2242,16 +2242,20 @@
 			#size-cells = <1>;
 			#iommu-cells = <1>;
 			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
+			/*
+			 * Global register window. On a non-secure SMMU HLOS must
+			 * program the global space (SMR/S2CR/CBAR/CR0) itself, so
+			 * map it here. Context banks live at +0x8000 (see ranges),
+			 * so the global window is the first 0x8000.
+			 */
+			reg = <0xfdb10000 0x8000>;
 			ranges = <0 0xfdb18000 0x10000>;
 			clocks = <&mmcc OXILICX_AHB_CLK>,
 				 <&mmcc OXILICX_AXI_CLK>,
-				 <&mmcc OXILI_GFX3D_CLK>;
-			clock-names = "iface", "bus", "tbu";
+				 <&mmcc OXILI_GFX3D_CLK>,
+				 <&mmcc MMSS_S0_AXI_CLK>;
+			clock-names = "iface", "bus", "tbu", "mmssnoc";
 			power-domains = <&mmcc OXILICX_GDSC>;
-			/* Vote the MMSS<->EBI path before touching the SMMU. */
-			interconnects = <&mmssnoc MNOC_MAS_GRAPHICS_3D
-					 &bimc BIMC_SLV_EBI_CH0>;
-			interconnect-names = "mmss-ebi";
 			/*
 			 * The Adreno GPU SMMU is non-secure: HLOS programs the stream
 			 * mapping and page tables directly, with no TrustZone path.
@@ -2314,6 +2318,14 @@
 			clock-names = "iface", "bus";
 			power-domains = <&mmcc VENUS0_GDSC>;
 			qcom,iommu-secure-id = <0>;
+			/*
+			 * Disabled during GPU IOMMU bring-up. This node still takes
+			 * the secure TrustZone path (restore_sec_cfg) which faults
+			 * and resets the SoC on this platform, and its consumer (the
+			 * Venus codec) is disabled anyway. Re-enable as non-secure
+			 * once the GPU path is validated.
+			 */
+			status = "disabled";
 
 			/* venus_ns non-secure context bank */
 			iommu-ctx@8000 {
