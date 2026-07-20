@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
- * Qualcomm Sensor Manager proximity sensor driver
+ * Qualcomm Sensor Manager ambient light sensor driver
  *
  * Copyright (c) 2022, Yassine Oudjana <y.oudjana@protonmail.com>
  */
@@ -12,9 +12,9 @@
 #include <linux/iio/iio.h>
 #include <linux/iio/kfifo_buf.h>
 
-static const struct iio_chan_spec qcom_smgr_prox_iio_channels[] = {
+static const struct iio_chan_spec qcom_smgr_light_iio_channels[] = {
 	{
-		.type = IIO_PROXIMITY,
+		.type = IIO_LIGHT,
 		.scan_index = 0,
 		.scan_type = {
 			.sign = 'u',
@@ -22,8 +22,7 @@ static const struct iio_chan_spec qcom_smgr_prox_iio_channels[] = {
 			.storagebits = 32,
 			.endianness = IIO_LE,
 		},
-		.info_mask_separate = BIT(IIO_CHAN_INFO_OFFSET) |
-				      BIT(IIO_CHAN_INFO_SCALE) |
+		.info_mask_separate = BIT(IIO_CHAN_INFO_SCALE) |
 				      BIT(IIO_CHAN_INFO_SAMP_FREQ)
 	},
 	{
@@ -39,7 +38,7 @@ static const struct iio_chan_spec qcom_smgr_prox_iio_channels[] = {
 	},
 };
 
-static int qcom_smgr_prox_probe(struct platform_device *pdev)
+static int qcom_smgr_light_probe(struct platform_device *pdev)
 {
 	struct iio_dev *iio_dev;
 	struct qcom_smgr_iio_priv *priv;
@@ -51,13 +50,13 @@ static int qcom_smgr_prox_probe(struct platform_device *pdev)
 
 	priv = iio_priv(iio_dev);
 	priv->sensor = *(struct qcom_smgr_sensor **)pdev->dev.platform_data;
-	priv->data_type_idx = SNS_SMGR_DATA_TYPE_PRIMARY;
+	priv->data_type_idx = SNS_SMGR_DATA_TYPE_SECONDARY;
 	priv->sensor->iio_devs[priv->data_type_idx] = iio_dev;
 
-	iio_dev->name = "qcom-smgr-prox";
+	iio_dev->name = "qcom-smgr-light";
 	iio_dev->info = &qcom_smgr_iio_info;
-	iio_dev->channels = qcom_smgr_prox_iio_channels;
-	iio_dev->num_channels = ARRAY_SIZE(qcom_smgr_prox_iio_channels);
+	iio_dev->channels = qcom_smgr_light_iio_channels;
+	iio_dev->num_channels = ARRAY_SIZE(qcom_smgr_light_iio_channels);
 
 	ret = devm_iio_kfifo_buffer_setup(&pdev->dev, iio_dev,
 					  &qcom_smgr_buffer_ops);
@@ -79,29 +78,29 @@ static int qcom_smgr_prox_probe(struct platform_device *pdev)
 	return 0;
 }
 
-static void qcom_smgr_prox_remove(struct platform_device *pdev)
+static void qcom_smgr_light_remove(struct platform_device *pdev)
 {
 	struct qcom_smgr_sensor *sensor = platform_get_drvdata(pdev);
 
-	sensor->iio_devs[SNS_SMGR_DATA_TYPE_PRIMARY] = NULL;
+	sensor->iio_devs[SNS_SMGR_DATA_TYPE_SECONDARY] = NULL;
 }
 
-static const struct platform_device_id qcom_smgr_prox_ids[] = {
-	{ .name = "qcom-smgr-prox-light" },
+static const struct platform_device_id qcom_smgr_light_ids[] = {
+	{ .name = "qcom-smgr-light" },
 	{ /* sentinel */ }
 };
-MODULE_DEVICE_TABLE(platform, qcom_smgr_prox_ids);
+MODULE_DEVICE_TABLE(platform, qcom_smgr_light_ids);
 
-static struct platform_driver qcom_smgr_prox_driver = {
-	.probe = qcom_smgr_prox_probe,
-	.remove = qcom_smgr_prox_remove,
+static struct platform_driver qcom_smgr_light_driver = {
+	.probe = qcom_smgr_light_probe,
+	.remove = qcom_smgr_light_remove,
 	.driver	= {
-		.name = "qcom_smgr_prox",
+		.name = "qcom_smgr_light",
 	},
-	.id_table = qcom_smgr_prox_ids,
+	.id_table = qcom_smgr_light_ids,
 };
-module_platform_driver(qcom_smgr_prox_driver);
+module_platform_driver(qcom_smgr_light_driver);
 
 MODULE_AUTHOR("Yassine Oudjana <y.oudjana@protonmail.com>");
-MODULE_DESCRIPTION("Qualcomm Sensor Manager proximity sensor driver");
+MODULE_DESCRIPTION("Qualcomm Sensor Manager ambient light sensor driver");
 MODULE_LICENSE("GPL");

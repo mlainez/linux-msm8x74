@@ -25,7 +25,7 @@ struct qcom_pdm_domain_data {
 	const char *domain;
 	u32 instance_id;
 	/* NULL-terminated array */
-	const char * services[];
+	const char *services[];
 };
 
 struct qcom_pdm_domain {
@@ -64,8 +64,7 @@ static struct qcom_pdm_service *qcom_pdm_find(struct qcom_pdm_data *data,
 
 static int qcom_pdm_add_service_domain(struct qcom_pdm_data *data,
 				       const char *service_name,
-				       const char *domain_name,
-				       u32 instance_id)
+				       const char *domain_name, u32 instance_id)
 {
 	struct qcom_pdm_service *service;
 	struct qcom_pdm_domain *domain;
@@ -110,16 +109,13 @@ static int qcom_pdm_add_domain(struct qcom_pdm_data *data,
 	int ret;
 	int i;
 
-	ret = qcom_pdm_add_service_domain(data,
-					  TMS_SERVREG_SERVICE,
-					  domain->domain,
-					  domain->instance_id);
+	ret = qcom_pdm_add_service_domain(data, TMS_SERVREG_SERVICE,
+					  domain->domain, domain->instance_id);
 	if (ret)
 		return ret;
 
 	for (i = 0; domain->services[i]; i++) {
-		ret = qcom_pdm_add_service_domain(data,
-						  domain->services[i],
+		ret = qcom_pdm_add_service_domain(data, domain->services[i],
 						  domain->domain,
 						  domain->instance_id);
 		if (ret)
@@ -127,7 +123,6 @@ static int qcom_pdm_add_domain(struct qcom_pdm_data *data,
 	}
 
 	return 0;
-
 }
 
 static void qcom_pdm_free_domains(struct qcom_pdm_data *data)
@@ -136,7 +131,8 @@ static void qcom_pdm_free_domains(struct qcom_pdm_data *data)
 	struct qcom_pdm_domain *domain, *tdomain;
 
 	list_for_each_entry_safe(service, tservice, &data->services, list) {
-		list_for_each_entry_safe(domain, tdomain, &service->domains, list) {
+		list_for_each_entry_safe(domain, tdomain, &service->domains,
+					 list) {
 			list_del(&domain->list);
 			kfree(domain);
 		}
@@ -148,10 +144,10 @@ static void qcom_pdm_free_domains(struct qcom_pdm_data *data)
 
 static void qcom_pdm_get_domain_list(struct qmi_handle *qmi,
 				     struct sockaddr_qrtr *sq,
-				     struct qmi_txn *txn,
-				     const void *decoded)
+				     struct qmi_txn *txn, const void *decoded)
 {
-	struct qcom_pdm_data *data = container_of(qmi, struct qcom_pdm_data, handle);
+	struct qcom_pdm_data *data =
+		container_of(qmi, struct qcom_pdm_data, handle);
 	const struct servreg_get_domain_list_req *req = decoded;
 	struct servreg_get_domain_list_resp *rsp;
 	struct qcom_pdm_service *service;
@@ -190,7 +186,8 @@ static void qcom_pdm_get_domain_list(struct qmi_handle *qmi,
 
 				strscpy(rsp->domain_list[j].name, domain->name,
 					sizeof(rsp->domain_list[i].name));
-				rsp->domain_list[j].instance = domain->instance_id;
+				rsp->domain_list[j].instance =
+					domain->instance_id;
 
 				pr_debug("PDM: found %s / %d\n", domain->name,
 					 domain->instance_id);
@@ -198,8 +195,10 @@ static void qcom_pdm_get_domain_list(struct qmi_handle *qmi,
 		}
 	}
 
-	pr_debug("PDM: service '%s' offset %d returning %d domains (of %d)\n", req->service_name,
-		 req->domain_offset_valid ? req->domain_offset : -1, rsp->domain_list_len, rsp->total_domains);
+	pr_debug("PDM: service '%s' offset %d returning %d domains (of %d)\n",
+		 req->service_name,
+		 req->domain_offset_valid ? req->domain_offset : -1,
+		 rsp->domain_list_len, rsp->total_domains);
 
 	ret = qmi_send_response(qmi, sq, txn, SERVREG_GET_DOMAIN_LIST_REQ,
 				SERVREG_GET_DOMAIN_LIST_RESP_MAX_LEN,
@@ -212,16 +211,15 @@ static void qcom_pdm_get_domain_list(struct qmi_handle *qmi,
 	kfree(rsp);
 }
 
-static void qcom_pdm_pfr(struct qmi_handle *qmi,
-			 struct sockaddr_qrtr *sq,
-			 struct qmi_txn *txn,
-			 const void *decoded)
+static void qcom_pdm_pfr(struct qmi_handle *qmi, struct sockaddr_qrtr *sq,
+			 struct qmi_txn *txn, const void *decoded)
 {
 	const struct servreg_loc_pfr_req *req = decoded;
 	struct servreg_loc_pfr_resp rsp = {};
 	int ret;
 
-	pr_warn_ratelimited("PDM: service '%s' crash: '%s'\n", req->service, req->reason);
+	pr_warn_ratelimited("PDM: service '%s' crash: '%s'\n", req->service,
+			    req->reason);
 
 	rsp.rsp.result = QMI_RESULT_SUCCESS_V01;
 	rsp.rsp.error = QMI_ERR_NONE_V01;
@@ -248,7 +246,7 @@ static const struct qmi_msg_handler qcom_pdm_msg_handlers[] = {
 		.decoded_size = sizeof(struct servreg_loc_pfr_req),
 		.fn = qcom_pdm_pfr,
 	},
-	{ },
+	{},
 };
 
 static const struct qcom_pdm_domain_data adsp_audio_pd = {
@@ -367,6 +365,18 @@ static const struct qcom_pdm_domain_data *msm8996_domains[] = {
 	NULL,
 };
 
+static const struct qcom_pdm_domain_data *msm8953_domains[] = {
+	&adsp_audio_pd, &adsp_root_pd, &adsp_sensor_pd,
+	&mpss_root_pd,	&mpss_wlan_pd, NULL,
+};
+
+static const struct qcom_pdm_domain_data *msm8974_domains[] = {
+	&adsp_audio_pd,
+	&adsp_root_pd,
+	&adsp_sensor_pd,
+	NULL,
+};
+
 static const struct qcom_pdm_domain_data *msm8998_domains[] = {
 	&mpss_root_pd,
 	&mpss_wlan_pd,
@@ -374,31 +384,19 @@ static const struct qcom_pdm_domain_data *msm8998_domains[] = {
 };
 
 static const struct qcom_pdm_domain_data *qcm2290_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_sensor_pd,
-	&mpss_root_pd_gps,
-	&mpss_wlan_pd,
-	NULL,
+	&adsp_audio_pd,	   &adsp_root_pd, &adsp_sensor_pd,
+	&mpss_root_pd_gps, &mpss_wlan_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *qcs404_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_sensor_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd,
-	&mpss_wlan_pd,
+	&adsp_audio_pd, &adsp_root_pd, &adsp_sensor_pd,
+	&cdsp_root_pd,	&mpss_root_pd, &mpss_wlan_pd,
 	NULL,
 };
 
 static const struct qcom_pdm_domain_data *sc7180_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd_pdr,
-	&adsp_sensor_pd,
-	&mpss_root_pd_gps_pdr,
-	&mpss_wlan_pd,
-	NULL,
+	&adsp_audio_pd,	       &adsp_root_pd_pdr, &adsp_sensor_pd,
+	&mpss_root_pd_gps_pdr, &mpss_wlan_pd,	  NULL,
 };
 
 static const struct qcom_pdm_domain_data *sc7280_domains[] = {
@@ -412,109 +410,62 @@ static const struct qcom_pdm_domain_data *sc7280_domains[] = {
 };
 
 static const struct qcom_pdm_domain_data *sc8180x_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_charger_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd_gps,
-	&mpss_wlan_pd,
+	&adsp_audio_pd, &adsp_root_pd,	   &adsp_charger_pd,
+	&cdsp_root_pd,	&mpss_root_pd_gps, &mpss_wlan_pd,
 	NULL,
 };
 
 static const struct qcom_pdm_domain_data *sc8280xp_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd_pdr,
-	&adsp_charger_pd,
-	&cdsp_root_pd,
+	&adsp_audio_pd, &adsp_root_pd_pdr, &adsp_charger_pd, &cdsp_root_pd,
 	NULL,
 };
 
 /* Unlike SDM660, SDM630/636 lack CDSP */
 static const struct qcom_pdm_domain_data *sdm630_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_sensor_pd,
-	&mpss_root_pd,
-	&mpss_wlan_pd,
-	NULL,
+	&adsp_audio_pd, &adsp_root_pd, &adsp_sensor_pd,
+	&mpss_root_pd,	&mpss_wlan_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *sdm660_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_sensor_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd,
-	&mpss_wlan_pd,
+	&adsp_audio_pd, &adsp_root_pd, &adsp_sensor_pd,
+	&cdsp_root_pd,	&mpss_root_pd, &mpss_wlan_pd,
 	NULL,
 };
 
 static const struct qcom_pdm_domain_data *sdm670_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd,
-	&mpss_wlan_pd,
-	NULL,
+	&adsp_audio_pd, &adsp_root_pd, &cdsp_root_pd,
+	&mpss_root_pd,	&mpss_wlan_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *sdm845_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd,
-	&mpss_wlan_pd,
-	&slpi_root_pd,
-	&slpi_sensor_pd,
-	NULL,
+	&adsp_audio_pd, &adsp_root_pd, &cdsp_root_pd,	&mpss_root_pd,
+	&mpss_wlan_pd,	&slpi_root_pd, &slpi_sensor_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *sm6115_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_sensor_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd_gps,
-	&mpss_wlan_pd,
+	&adsp_audio_pd, &adsp_root_pd,	   &adsp_sensor_pd,
+	&cdsp_root_pd,	&mpss_root_pd_gps, &mpss_wlan_pd,
 	NULL,
 };
 
 static const struct qcom_pdm_domain_data *sm6350_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_sensor_pd,
-	&cdsp_root_pd,
-	&mpss_wlan_pd,
-	NULL,
+	&adsp_audio_pd, &adsp_root_pd, &adsp_sensor_pd,
+	&cdsp_root_pd,	&mpss_wlan_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *sm8150_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd_gps,
-	&mpss_wlan_pd,
-	NULL,
+	&adsp_audio_pd,	   &adsp_root_pd, &cdsp_root_pd,
+	&mpss_root_pd_gps, &mpss_wlan_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *sm8250_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&cdsp_root_pd,
-	&slpi_root_pd,
-	&slpi_sensor_pd,
-	NULL,
+	&adsp_audio_pd, &adsp_root_pd,	 &cdsp_root_pd,
+	&slpi_root_pd,	&slpi_sensor_pd, NULL,
 };
 
 static const struct qcom_pdm_domain_data *sm8350_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd_pdr,
-	&adsp_charger_pd,
-	&cdsp_root_pd,
-	&mpss_root_pd_gps,
-	&slpi_root_pd,
-	&slpi_sensor_pd,
-	NULL,
+	&adsp_audio_pd,	   &adsp_root_pd_pdr, &adsp_charger_pd, &cdsp_root_pd,
+	&mpss_root_pd_gps, &slpi_root_pd,     &slpi_sensor_pd,	NULL,
 };
 
 static const struct qcom_pdm_domain_data *sm8550_domains[] = {
@@ -528,53 +479,171 @@ static const struct qcom_pdm_domain_data *sm8550_domains[] = {
 };
 
 static const struct qcom_pdm_domain_data *x1e80100_domains[] = {
-	&adsp_audio_pd,
-	&adsp_root_pd,
-	&adsp_charger_pd,
-	&adsp_sensor_pd,
-	&cdsp_root_pd,
-	NULL,
+	&adsp_audio_pd,	 &adsp_root_pd, &adsp_charger_pd,
+	&adsp_sensor_pd, &cdsp_root_pd, NULL,
 };
 
 static const struct of_device_id qcom_pdm_domains[] __maybe_unused = {
-	{ .compatible = "qcom,apq8016", .data = NULL, },
-	{ .compatible = "qcom,apq8064", .data = NULL, },
-	{ .compatible = "qcom,apq8074", .data = NULL, },
-	{ .compatible = "qcom,apq8084", .data = NULL, },
-	{ .compatible = "qcom,apq8096", .data = msm8996_domains, },
-	{ .compatible = "qcom,msm8226", .data = NULL, },
-	{ .compatible = "qcom,msm8909", .data = NULL, },
-	{ .compatible = "qcom,msm8916", .data = NULL, },
-	{ .compatible = "qcom,msm8939", .data = NULL, },
-	{ .compatible = "qcom,msm8974", .data = NULL, },
-	{ .compatible = "qcom,msm8996", .data = msm8996_domains, },
-	{ .compatible = "qcom,msm8998", .data = msm8998_domains, },
-	{ .compatible = "qcom,qcm2290", .data = qcm2290_domains, },
-	{ .compatible = "qcom,qcm6490", .data = sc7280_domains, },
-	{ .compatible = "qcom,qcs404", .data = qcs404_domains, },
-	{ .compatible = "qcom,sc7180", .data = sc7180_domains, },
-	{ .compatible = "qcom,sc7280", .data = sc7280_domains, },
-	{ .compatible = "qcom,sc8180x", .data = sc8180x_domains, },
-	{ .compatible = "qcom,sc8280xp", .data = sc8280xp_domains, },
-	{ .compatible = "qcom,sdm630", .data = sdm630_domains, },
-	{ .compatible = "qcom,sdm636", .data = sdm630_domains, },
-	{ .compatible = "qcom,sda660", .data = sdm660_domains, },
-	{ .compatible = "qcom,sdm660", .data = sdm660_domains, },
-	{ .compatible = "qcom,sdm670", .data = sdm670_domains, },
-	{ .compatible = "qcom,sdm845", .data = sdm845_domains, },
-	{ .compatible = "qcom,sm4250", .data = sm6115_domains, },
-	{ .compatible = "qcom,sm6115", .data = sm6115_domains, },
-	{ .compatible = "qcom,sm6350", .data = sm6350_domains, },
-	{ .compatible = "qcom,sm7225", .data = sm6350_domains, },
-	{ .compatible = "qcom,sm7325", .data = sc7280_domains, },
-	{ .compatible = "qcom,sm8150", .data = sm8150_domains, },
-	{ .compatible = "qcom,sm8250", .data = sm8250_domains, },
-	{ .compatible = "qcom,sm8350", .data = sm8350_domains, },
-	{ .compatible = "qcom,sm8450", .data = sm8350_domains, },
-	{ .compatible = "qcom,sm8550", .data = sm8550_domains, },
-	{ .compatible = "qcom,sm8650", .data = sm8550_domains, },
-	{ .compatible = "qcom,x1e80100", .data = x1e80100_domains, },
-	{ .compatible = "qcom,x1p42100", .data = x1e80100_domains, },
+	{
+		.compatible = "qcom,apq8016",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,apq8064",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,apq8074",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,apq8084",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,apq8096",
+		.data = msm8996_domains,
+	},
+	{
+		.compatible = "qcom,msm8226",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,msm8909",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,msm8916",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,msm8939",
+		.data = NULL,
+	},
+	{
+		.compatible = "qcom,msm8953",
+		.data = msm8953_domains,
+	},
+	{
+		.compatible = "qcom,msm8974",
+		.data = msm8974_domains,
+	},
+	{
+		.compatible = "qcom,msm8996",
+		.data = msm8996_domains,
+	},
+	{
+		.compatible = "qcom,msm8998",
+		.data = msm8998_domains,
+	},
+	{
+		.compatible = "qcom,qcm2290",
+		.data = qcm2290_domains,
+	},
+	{
+		.compatible = "qcom,qcm6490",
+		.data = sc7280_domains,
+	},
+	{
+		.compatible = "qcom,qcs404",
+		.data = qcs404_domains,
+	},
+	{
+		.compatible = "qcom,sc7180",
+		.data = sc7180_domains,
+	},
+	{
+		.compatible = "qcom,sc7280",
+		.data = sc7280_domains,
+	},
+	{
+		.compatible = "qcom,sc8180x",
+		.data = sc8180x_domains,
+	},
+	{
+		.compatible = "qcom,sc8280xp",
+		.data = sc8280xp_domains,
+	},
+	{
+		.compatible = "qcom,sdm630",
+		.data = sdm630_domains,
+	},
+	{
+		.compatible = "qcom,sdm632",
+		.data = msm8953_domains,
+	},
+	{
+		.compatible = "qcom,sdm636",
+		.data = sdm630_domains,
+	},
+	{
+		.compatible = "qcom,sda660",
+		.data = sdm660_domains,
+	},
+	{
+		.compatible = "qcom,sdm660",
+		.data = sdm660_domains,
+	},
+	{
+		.compatible = "qcom,sdm670",
+		.data = sdm670_domains,
+	},
+	{
+		.compatible = "qcom,sdm845",
+		.data = sdm845_domains,
+	},
+	{
+		.compatible = "qcom,sm4250",
+		.data = sm6115_domains,
+	},
+	{
+		.compatible = "qcom,sm6115",
+		.data = sm6115_domains,
+	},
+	{
+		.compatible = "qcom,sm6350",
+		.data = sm6350_domains,
+	},
+	{
+		.compatible = "qcom,sm7225",
+		.data = sm6350_domains,
+	},
+	{
+		.compatible = "qcom,sm7325",
+		.data = sc7280_domains,
+	},
+	{
+		.compatible = "qcom,sm8150",
+		.data = sm8150_domains,
+	},
+	{
+		.compatible = "qcom,sm8250",
+		.data = sm8250_domains,
+	},
+	{
+		.compatible = "qcom,sm8350",
+		.data = sm8350_domains,
+	},
+	{
+		.compatible = "qcom,sm8450",
+		.data = sm8350_domains,
+	},
+	{
+		.compatible = "qcom,sm8550",
+		.data = sm8550_domains,
+	},
+	{
+		.compatible = "qcom,sm8650",
+		.data = sm8550_domains,
+	},
+	{
+		.compatible = "qcom,x1e80100",
+		.data = x1e80100_domains,
+	},
+	{
+		.compatible = "qcom,x1p42100",
+		.data = x1e80100_domains,
+	},
 	{},
 };
 
@@ -590,7 +659,7 @@ static void qcom_pdm_stop(struct qcom_pdm_data *data)
 
 static struct qcom_pdm_data *qcom_pdm_start(void)
 {
-	const struct qcom_pdm_domain_data * const *domains;
+	const struct qcom_pdm_domain_data *const *domains;
 	const struct of_device_id *match;
 	struct qcom_pdm_data *data;
 	struct device_node *root;
@@ -603,7 +672,8 @@ static struct qcom_pdm_data *qcom_pdm_start(void)
 	match = of_match_node(qcom_pdm_domains, root);
 	of_node_put(root);
 	if (!match) {
-		pr_notice("PDM: no support for the platform, userspace daemon might be required.\n");
+		pr_notice(
+			"PDM: no support for the platform, userspace daemon might be required.\n");
 		return ERR_PTR(-ENODEV);
 	}
 
@@ -619,8 +689,9 @@ static struct qcom_pdm_data *qcom_pdm_start(void)
 
 	INIT_LIST_HEAD(&data->services);
 
-	ret = qmi_handle_init(&data->handle, SERVREG_GET_DOMAIN_LIST_REQ_MAX_LEN,
-			      NULL, qcom_pdm_msg_handlers);
+	ret = qmi_handle_init(&data->handle,
+			      SERVREG_GET_DOMAIN_LIST_REQ_MAX_LEN, NULL,
+			      qcom_pdm_msg_handlers);
 	if (ret) {
 		kfree(data);
 		return ERR_PTR(ret);
