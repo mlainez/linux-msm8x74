@@ -507,9 +507,23 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		/* SCTLR */
 		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
-		      ARM_SMMU_SCTLR_AFE | ARM_SMMU_SCTLR_TRE |
+		      ARM_SMMU_SCTLR_TRE |
 		      ARM_SMMU_SCTLR_M | ARM_SMMU_SCTLR_S1_ASIDPNE |
 		      ARM_SMMU_SCTLR_CFCFG;
+
+		/*
+		 * The MSM8974 QSMMU-v2 raises an Access-Flag Fault (FSR.AFF) on
+		 * the first stage-1 walk even with SCTLR.AFE cleared -- unlike
+		 * the ARM SMMU architectural behaviour, clearing AFE alone does
+		 * not disable AF faulting on this IP. Set the Qualcomm-specific
+		 * AFFD (Access-Flag-Fault-Disable) bit instead. The secure path
+		 * (msm8916 etc.) keeps the architectural AFE and does not touch
+		 * the vendor AFFD bit.
+		 */
+		if (qcom_iommu->nonsecure)
+			reg |= ARM_SMMU_SCTLR_AFFD;
+		else
+			reg |= ARM_SMMU_SCTLR_AFE;
 
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
 			reg |= ARM_SMMU_SCTLR_E;
@@ -1138,6 +1152,67 @@ static void qcom_iommu_device_remove(struct platform_device *pdev)
 	iommu_device_unregister(&qcom_iommu->iommu);
 }
 
+/*
+ * Re-apply the global space and every attached context bank after the SMMU
+ * has lost power. On MSM8974 the non-secure GPU SMMU shares the GPU power
+ * domain, so when the GPU runtime-suspends the SMMU is power-collapsed and
+ * all of its registers reset. The secure path is restored by TrustZone
+ * (qcom_scm_restore_sec_cfg); the non-secure path must re-establish the
+ * global control/stream mapping and each context bank itself, or the next
+ * GPU access silently stalls with translation disabled (no fault, just a
+ * hang) -- the classic "second submit after idle wedges the GPU".
+ */
+static void qcom_iommu_nonsecure_restore(struct qcom_iommu_dev *qcom_iommu)
+{
+	int i;
+
+	if (!qcom_iommu->nonsecure || !qcom_iommu->glb_inited)
+		return;
+
+	qcom_iommu_glb_halt(qcom_iommu);
+	qcom_iommu_glb_reset(qcom_iommu);
+
+	for (i = 0; i <= qcom_iommu->max_asid; i++) {
+		struct qcom_iommu_ctx *ctx = qcom_iommu->ctxs[i];
+		struct qcom_iommu_domain *qcom_domain;
+		struct io_pgtable_cfg *cfg;
+		u32 reg;
+
+		if (!ctx || !ctx->domain)
+			continue;
+		qcom_domain = to_qcom_iommu_domain(ctx->domain);
+		if (!qcom_domain->pgtbl_ops)
+			continue;
+		cfg = &io_pgtable_ops_to_pgtable(qcom_domain->pgtbl_ops)->cfg;
+
+		qcom_iommu_glb_program_ctx(qcom_iommu, ctx);
+
+		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_FAR, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_FSR, ARM_SMMU_CB_FSR_FAULT);
+		iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
+			     cfg->arm_lpae_s1_cfg.ttbr |
+			     FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
+		iommu_writeq(ctx, ARM_SMMU_CB_TTBR1, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_TCR,
+			     arm_smmu_lpae_tcr(cfg) | ARM_SMMU_TCR_EAE);
+		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
+			     cfg->arm_lpae_s1_cfg.mair);
+		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
+			     cfg->arm_lpae_s1_cfg.mair >> 32);
+
+		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
+		      ARM_SMMU_SCTLR_TRE | ARM_SMMU_SCTLR_M |
+		      ARM_SMMU_SCTLR_S1_ASIDPNE | ARM_SMMU_SCTLR_CFCFG |
+		      ARM_SMMU_SCTLR_AFFD;
+		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
+			reg |= ARM_SMMU_SCTLR_E;
+		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
+	}
+
+	qcom_iommu_glb_resume(qcom_iommu);
+}
+
 static int __maybe_unused qcom_iommu_resume(struct device *dev)
 {
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
@@ -1165,6 +1240,9 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 		if (ret)
 			goto err_clk;
 	}
+
+	/* Non-secure: re-establish SMMU state lost to power collapse. */
+	qcom_iommu_nonsecure_restore(qcom_iommu);
 
 	return 0;
 
