@@ -400,36 +400,66 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 {
 	struct qcom_iommu_domain *qcom_domain = to_qcom_iommu_domain(domain);
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
-	struct io_pgtable_ops *pgtbl_ops;
+	struct io_pgtable_ops *pgtbl_ops = NULL;
 	struct io_pgtable_cfg pgtbl_cfg;
 	int i, ret = 0;
 	u32 reg;
 
 	mutex_lock(&qcom_domain->init_mutex);
-	if (qcom_domain->iommu)
-		goto out_unlock;
+	if (qcom_domain->iommu) {
+		/*
+		 * The domain is already finalized, but that must not skip the
+		 * hardware programming below: a detach through
+		 * qcom_iommu_identity_attach() disables the context bank
+		 * (SCTLR = 0) and clears ctx->domain while qcom_domain->iommu
+		 * stays set.  Returning early here on a later re-attach would
+		 * report success with the context bank still in never-faulting
+		 * bypass -- the device then fetches physical addresses where
+		 * it meant IOVAs -- and, with ctx->domain still NULL,
+		 * qcom_iommu_nonsecure_restore() skips the bank on every
+		 * resume, so the state is never repaired.  Only the page-table
+		 * allocation is one-time; context banks are (re)programmed on
+		 * every attach.
+		 */
+		if (qcom_domain->iommu != qcom_iommu) {
+			ret = -EINVAL;
+			goto out_unlock;
+		}
 
+		pgtbl_cfg = io_pgtable_ops_to_pgtable(qcom_domain->pgtbl_ops)->cfg;
+	} else {
+		pgtbl_cfg = (struct io_pgtable_cfg) {
+			.pgsize_bitmap	= domain->pgsize_bitmap,
+			.ias		= 32,
+			.oas		= 40,
+			.tlb		= &qcom_flush_ops,
+			.iommu_dev	= qcom_iommu->dev,
+		};
 
-	pgtbl_cfg = (struct io_pgtable_cfg) {
-		.pgsize_bitmap	= domain->pgsize_bitmap,
-		.ias		= 32,
-		.oas		= 40,
-		.tlb		= &qcom_flush_ops,
-		.iommu_dev	= qcom_iommu->dev,
-	};
+		qcom_domain->iommu = qcom_iommu;
+		qcom_domain->fwspec = fwspec;
 
-	qcom_domain->iommu = qcom_iommu;
-	qcom_domain->fwspec = fwspec;
+		pgtbl_ops = alloc_io_pgtable_ops(ARM_32_LPAE_S1, &pgtbl_cfg,
+						 qcom_domain);
+		if (!pgtbl_ops) {
+			dev_err(qcom_iommu->dev,
+				"failed to allocate pagetable ops\n");
+			ret = -ENOMEM;
+			goto out_err;
+		}
 
-	pgtbl_ops = alloc_io_pgtable_ops(ARM_32_LPAE_S1, &pgtbl_cfg, qcom_domain);
-	if (!pgtbl_ops) {
-		dev_err(qcom_iommu->dev, "failed to allocate pagetable ops\n");
-		ret = -ENOMEM;
-		goto out_clear_iommu;
+		domain->geometry.aperture_end = (1ULL << pgtbl_cfg.ias) - 1;
+		domain->geometry.force_aperture = true;
+
+		/*
+		 * Publish the page-table ops under init_mutex and before any
+		 * context bank is enabled: qcom_iommu_nonsecure_restore()
+		 * must never observe an enabled context bank whose domain has
+		 * no pgtbl_ops yet, or it would leave that bank disabled
+		 * (bypass) after a power collapse.
+		 */
+		qcom_domain->pgtbl_ops = pgtbl_ops;
 	}
-
-	domain->geometry.aperture_end = (1ULL << pgtbl_cfg.ias) - 1;
-	domain->geometry.force_aperture = true;
 
 	/*
 	 * Non-secure SMMU: TrustZone does not set up the global space, so halt
@@ -437,8 +467,11 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	 */
 	if (qcom_iommu->nonsecure) {
 		ret = qcom_iommu_glb_halt(qcom_iommu);
-		if (ret)
-			goto out_clear_iommu;
+		if (ret) {
+			/* Do not leave the halt request latched on failure. */
+			qcom_iommu_glb_resume(qcom_iommu);
+			goto out_err;
+		}
 		if (!qcom_iommu->glb_inited) {
 			qcom_iommu_glb_reset(qcom_iommu);
 			qcom_iommu->glb_inited = true;
@@ -452,7 +485,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, ctx->asid);
 			if (ret) {
 				dev_err(qcom_iommu->dev, "secure init failed: %d\n", ret);
-				goto out_clear_iommu;
+				goto out_err;
 			}
 			ctx->secure_init = true;
 		}
@@ -537,13 +570,22 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 	mutex_unlock(&qcom_domain->init_mutex);
 
-	/* Publish page table ops for map/unmap */
-	qcom_domain->pgtbl_ops = pgtbl_ops;
-
 	return 0;
 
-out_clear_iommu:
-	qcom_domain->iommu = NULL;
+out_err:
+	if (pgtbl_ops) {
+		/*
+		 * First finalization failed: unwind the state set above so a
+		 * later attach retries from scratch.  Order matters -- the
+		 * page-table free flushes the TLB through qcom_domain->iommu.
+		 */
+		qcom_domain->pgtbl_ops = NULL;
+		free_io_pgtable_ops(pgtbl_ops);
+		qcom_domain->iommu = NULL;
+	} else if (!qcom_domain->pgtbl_ops) {
+		/* Failed before the page table was allocated. */
+		qcom_domain->iommu = NULL;
+	}
 out_unlock:
 	mutex_unlock(&qcom_domain->init_mutex);
 	return ret;
@@ -574,6 +616,8 @@ static void qcom_iommu_domain_free(struct iommu_domain *domain)
 	struct qcom_iommu_domain *qcom_domain = to_qcom_iommu_domain(domain);
 
 	if (qcom_domain->iommu) {
+		unsigned int i;
+
 		/*
 		 * NOTE: unmap can be called after client device is powered
 		 * off, for example, with GPUs or anything involving dma-buf.
@@ -581,6 +625,27 @@ static void qcom_iommu_domain_free(struct iommu_domain *domain)
 		 * is on to avoid unclocked accesses in the TLB inv path:
 		 */
 		pm_runtime_get_sync(qcom_domain->iommu->dev);
+
+		/*
+		 * Disable the context banks and drop their back-pointers
+		 * before the page tables go away:
+		 * qcom_iommu_nonsecure_restore() walks ctx->domain ->
+		 * pgtbl_ops on every resume, and a stale ctx->domain here
+		 * would have it re-enable a context bank against freed page
+		 * tables.
+		 */
+		for (i = 0; i < qcom_domain->fwspec->num_ids; i++) {
+			struct qcom_iommu_ctx *ctx =
+				to_ctx(qcom_domain, qcom_domain->fwspec->ids[i]);
+
+			if (!ctx || ctx->domain != domain)
+				continue;
+
+			if (!ctx->secured_ctx)
+				iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+			ctx->domain = NULL;
+		}
+
 		free_io_pgtable_ops(qcom_domain->pgtbl_ops);
 		pm_runtime_put_sync(qcom_domain->iommu->dev);
 	}
@@ -1177,7 +1242,13 @@ static void qcom_iommu_nonsecure_restore(struct qcom_iommu_dev *qcom_iommu)
 		if (!ctx || !ctx->domain)
 			continue;
 		qcom_domain = to_qcom_iommu_domain(ctx->domain);
-		if (!qcom_domain->pgtbl_ops)
+		/*
+		 * Attached contexts always have page tables now that
+		 * qcom_iommu_init_domain() publishes pgtbl_ops before
+		 * enabling any context bank -- warn if that invariant breaks
+		 * instead of silently leaving the bank in bypass.
+		 */
+		if (WARN_ON(!qcom_domain->pgtbl_ops))
 			continue;
 		cfg = &io_pgtable_ops_to_pgtable(qcom_domain->pgtbl_ops)->cfg;
 
