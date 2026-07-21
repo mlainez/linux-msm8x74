@@ -1,0 +1,35 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Fairphone 2 (MSM8974Pro) - headless variant.
+ *
+ * Same as the full Fairphone 2 device tree but with the display subsystem
+ * disabled (for units whose panel is physically absent) and the Adreno GPU
+ * brought up as a standalone, GPU-only DRM device. With no MDP/DPU master
+ * to bind the GPU as a component, the "amd,imageon" compatible makes the
+ * adreno driver create a dummy "msm" DRM master; the GPU still uses its
+ * (non-secure) IOMMU. The chip is identified from its hardware chip-id, not
+ * this string. The base DTB (qcom-msm8974pro-fairphone-fp2.dtb) keeps the
+ * display enabled for complete phones.
+ */
+
+#include "qcom-msm8974pro-fairphone-fp2.dts"
+
+/ {
+	model = "Fairphone 2 (headless)";
+};
+
+&mdss {
+	status = "disabled";
+};
+
+&mdss_dsi0 {
+	status = "disabled";
+};
+
+&mdss_dsi0_phy {
+	status = "disabled";
+};
+
+&gpu {
+	compatible = "qcom,adreno-330.2", "qcom,adreno", "amd,imageon";
+};

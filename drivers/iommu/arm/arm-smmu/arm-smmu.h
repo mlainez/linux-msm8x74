@@ -149,6 +149,7 @@ enum arm_smmu_cbar_type {
 #define ARM_SMMU_SCTLR_CFIE		BIT(6)
 #define ARM_SMMU_SCTLR_CFRE		BIT(5)
 #define ARM_SMMU_SCTLR_E		BIT(4)
+#define ARM_SMMU_SCTLR_AFFD		BIT(3)	/* Qualcomm QSMMU-v2: Access Flag Fault Disable */
 #define ARM_SMMU_SCTLR_AFE		BIT(2)
 #define ARM_SMMU_SCTLR_TRE		BIT(1)
 #define ARM_SMMU_SCTLR_M		BIT(0)
