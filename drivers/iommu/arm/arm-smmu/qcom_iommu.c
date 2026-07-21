@@ -20,6 +20,7 @@
 #include <linux/iopoll.h>
 #include <linux/kconfig.h>
 #include <linux/init.h>
+#include <linux/interconnect.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -34,10 +35,67 @@
 
 #define SMMU_INTR_SEL_NS     0x2000
 
+/*
+ * QSMMU-v2 (MSM8974 MMSS) global register block, relative to local_base.
+ * On secure IOMMUs TrustZone programs these via restore_sec_cfg(); a
+ * non-secure IOMMU (no qcom,iommu-secure-id) has no TrustZone path, so the
+ * HLOS must set up global control, stream matching and context attribution
+ * itself -- otherwise a context-bank access at attach faults an unconfigured
+ * SMMU and resets the SoC.
+ */
+#define QSMMU_GLB_CR0			0x0000
+#define QSMMU_GLB_CR2			0x0008
+#define QSMMU_GLB_ACR			0x0010
+#define QSMMU_GLB_IDR0			0x0020
+#define QSMMU_GLB_GFAR			0x0040
+#define QSMMU_GLB_SGFSR			0x0048
+#define QSMMU_GLB_GFSRRESTORE		0x004c
+#define QSMMU_GLB_TLBIALLNSNH		0x0068
+#define QSMMU_GLB_SMR(n)		(0x0800 + ((n) << 2))
+#define QSMMU_GLB_S2CR(n)		(0x0c00 + ((n) << 2))
+#define QSMMU_GLB_CBAR(n)		(0x1000 + ((n) << 2))
+#define QSMMU_GLB_MICRO_MMU_CTRL	0x2000
+
+#define QSMMU_MMU_CTRL_HALT_REQ		BIT(2)
+#define QSMMU_MMU_CTRL_IDLE		BIT(3)
+
+#define QSMMU_CR0_SMCFCFG		BIT(21)
+#define QSMMU_CR0_USFCFG		BIT(10)
+#define QSMMU_CR0_STALLD		BIT(8)
+#define QSMMU_CR0_GCFGFIE		BIT(5)
+#define QSMMU_CR0_GCFGFRE		BIT(4)
+#define QSMMU_CR0_GFIE			BIT(2)
+#define QSMMU_CR0_GFRE			BIT(1)
+#define QSMMU_CR0_CLIENTPD		BIT(0)
+
+#define QSMMU_SMR_VALID			BIT(31)
+#define QSMMU_SMR_ID			GENMASK(14, 0)
+
+#define QSMMU_S2CR_CBNDX		GENMASK(7, 0)
+#define QSMMU_S2CR_MEMATTR		GENMASK(15, 12)
+#define QSMMU_S2CR_TYPE			GENMASK(17, 16)
+#define QSMMU_S2CR_NSCFG		GENMASK(19, 18)
+
+#define QSMMU_CBAR_VMID			GENMASK(7, 0)
+#define QSMMU_CBAR_BPSHCFG		GENMASK(9, 8)
+#define QSMMU_CBAR_MEMATTR		GENMASK(15, 12)
+#define QSMMU_CBAR_TYPE			GENMASK(17, 16)
+#define QSMMU_CBAR_IRPTNDX		GENMASK(31, 24)
+
+#define QSMMU_MEMATTR_WB		0xa	/* write-back, do not downgrade */
+#define QSMMU_HLOS_VMID			3	/* non-secure HLOS VMID */
+
 enum qcom_iommu_clk {
 	CLK_IFACE,
 	CLK_BUS,
 	CLK_TBU,
+	/*
+	 * Optional MMSS NoC AXI clock. On MSM8974 the multimedia SMMU sits
+	 * behind the MMSS NoC; that NoC must be clocked for the SMMU's bus
+	 * access to be routed, or the transaction faults and resets the SoC.
+	 * Absent (NULL, skipped) on SoCs that don't need it.
+	 */
+	CLK_MMSSNOC,
 	CLK_NUM,
 };
 
@@ -48,8 +106,23 @@ struct qcom_iommu_dev {
 	struct iommu_device	 iommu;
 	struct device		*dev;
 	struct clk_bulk_data clks[CLK_NUM];
+	/*
+	 * MMSS<->EBI interconnect path. Present only on SoCs (e.g. MSM8974)
+	 * whose IOMMU sits behind the multimedia NoC: the SMMU AXI path must
+	 * be voted up before any register access, or the un-arbitrated access
+	 * faults the NoC and resets the SoC. NULL when the DT has no
+	 * "interconnects" property (all other SoCs -- behaviour unchanged).
+	 */
+	struct icc_path		*icc_path;
 	void __iomem		*local_base;
 	u32			 sec_id;
+	/*
+	 * Non-secure IOMMU (no qcom,iommu-secure-id): the HLOS owns global
+	 * programming. local_base is the SMMU global register window.
+	 * glb_inited tracks the one-time global (CR0/reset) init.
+	 */
+	bool			 nonsecure;
+	bool			 glb_inited;
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -110,6 +183,8 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 {
 	return readq_relaxed(ctx->base + reg);
 }
+
+static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
 
 static void qcom_iommu_tlb_sync(void *cookie)
 {
@@ -213,6 +288,112 @@ static irqreturn_t qcom_iommu_fault(int irq, void *dev)
 	return IRQ_HANDLED;
 }
 
+/*
+ * Non-secure global programming (MSM8974 MMSS QSMMU-v2). These touch the
+ * SMMU global register window (local_base) and must run with the SMMU
+ * clocks enabled and the MMU halted.
+ */
+static int qcom_iommu_glb_halt(struct qcom_iommu_dev *qcom_iommu)
+{
+	void __iomem *base = qcom_iommu->local_base;
+	u32 val;
+
+	writel_relaxed(readl_relaxed(base + QSMMU_GLB_MICRO_MMU_CTRL) |
+		       QSMMU_MMU_CTRL_HALT_REQ,
+		       base + QSMMU_GLB_MICRO_MMU_CTRL);
+
+	/*
+	 * Runs in process context (init_domain holds a mutex), so sleep while
+	 * polling. Reprogramming a non-idle SMMU corrupts in-flight
+	 * translations, so a halt timeout must fail the attach, not continue.
+	 */
+	if (readl_poll_timeout(base + QSMMU_GLB_MICRO_MMU_CTRL, val,
+			       val & QSMMU_MMU_CTRL_IDLE, 10, 1000000)) {
+		dev_err(qcom_iommu->dev, "SMMU halt timeout\n");
+		return -ETIMEDOUT;
+	}
+
+	return 0;
+}
+
+static void qcom_iommu_glb_resume(struct qcom_iommu_dev *qcom_iommu)
+{
+	void __iomem *base = qcom_iommu->local_base;
+
+	writel_relaxed(readl_relaxed(base + QSMMU_GLB_MICRO_MMU_CTRL) &
+		       ~QSMMU_MMU_CTRL_HALT_REQ,
+		       base + QSMMU_GLB_MICRO_MMU_CTRL);
+}
+
+/* One-time global init: reset state and enable the SMMU (CLIENTPD clear). */
+static void qcom_iommu_glb_reset(struct qcom_iommu_dev *qcom_iommu)
+{
+	void __iomem *base = qcom_iommu->local_base;
+	u32 numsmr;
+	int i;
+
+	writel_relaxed(0, base + QSMMU_GLB_ACR);
+	writel_relaxed(0, base + QSMMU_GLB_CR2);
+	writel_relaxed(0, base + QSMMU_GLB_GFAR);
+	writel_relaxed(0, base + QSMMU_GLB_GFSRRESTORE);
+	writel_relaxed(0, base + QSMMU_GLB_TLBIALLNSNH);
+
+	/*
+	 * Clear any latched global fault the bootloader left behind (W1C).
+	 * Otherwise, once fault reporting is enabled below, the stale bit is
+	 * reported immediately.
+	 */
+	writel_relaxed(readl_relaxed(base + QSMMU_GLB_SGFSR),
+		       base + QSMMU_GLB_SGFSR);
+
+	/* Invalidate any stale stream-match entries the bootloader left. */
+	numsmr = readl_relaxed(base + QSMMU_GLB_IDR0) & 0xff;
+	if (!numsmr || numsmr > 128)
+		numsmr = 128;
+	for (i = 0; i < numsmr; i++)
+		writel_relaxed(0, base + QSMMU_GLB_SMR(i));
+
+	/*
+	 * Enable the SMMU (CLIENTPD clear) with fault *reporting* only. Do NOT
+	 * enable the global/config fault interrupts (GFIE/GCFGFIE): this driver
+	 * has no global-fault IRQ handler, and the global fault shares the
+	 * per-context GIC line. An enabled global interrupt with no handler
+	 * would never be de-asserted -> interrupt storm -> SoC reset.
+	 */
+	writel_relaxed(QSMMU_CR0_SMCFCFG | QSMMU_CR0_USFCFG | QSMMU_CR0_STALLD |
+		       QSMMU_CR0_GCFGFRE | QSMMU_CR0_GFRE,
+		       base + QSMMU_GLB_CR0);   /* CLIENTPD clear -> SMMU enabled */
+}
+
+/*
+ * Program the stream match (SMR), stream-to-context (S2CR) and context-bank
+ * attribution (CBAR) that TrustZone would program for a secure IOMMU. The
+ * GPU/Venus stream IDs equal their context-bank index on this SoC, so use
+ * the asid as both the SMR slot and the stream ID.
+ */
+static void qcom_iommu_glb_program_ctx(struct qcom_iommu_dev *qcom_iommu,
+				       struct qcom_iommu_ctx *ctx)
+{
+	void __iomem *base = qcom_iommu->local_base;
+	u32 idx = ctx->asid;
+
+	writel_relaxed(FIELD_PREP(QSMMU_CBAR_TYPE, 1) |	/* S1 translate, S2 bypass */
+		       FIELD_PREP(QSMMU_CBAR_IRPTNDX, 1) |
+		       FIELD_PREP(QSMMU_CBAR_VMID, QSMMU_HLOS_VMID) |
+		       FIELD_PREP(QSMMU_CBAR_BPSHCFG, 2) |
+		       FIELD_PREP(QSMMU_CBAR_MEMATTR, QSMMU_MEMATTR_WB),
+		       base + QSMMU_GLB_CBAR(idx));
+
+	writel_relaxed(QSMMU_SMR_VALID | FIELD_PREP(QSMMU_SMR_ID, idx),
+		       base + QSMMU_GLB_SMR(idx));
+
+	writel_relaxed(FIELD_PREP(QSMMU_S2CR_TYPE, 0) |	/* translate via CBNDX */
+		       FIELD_PREP(QSMMU_S2CR_CBNDX, idx) |
+		       FIELD_PREP(QSMMU_S2CR_MEMATTR, QSMMU_MEMATTR_WB) |
+		       FIELD_PREP(QSMMU_S2CR_NSCFG, 3),	/* force non-secure */
+		       base + QSMMU_GLB_S2CR(idx));
+}
+
 static int qcom_iommu_init_domain(struct iommu_domain *domain,
 				  struct qcom_iommu_dev *qcom_iommu,
 				  struct device *dev)
@@ -227,6 +408,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	mutex_lock(&qcom_domain->init_mutex);
 	if (qcom_domain->iommu)
 		goto out_unlock;
+
 
 	pgtbl_cfg = (struct io_pgtable_cfg) {
 		.pgsize_bitmap	= domain->pgsize_bitmap,
@@ -249,10 +431,24 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	domain->geometry.aperture_end = (1ULL << pgtbl_cfg.ias) - 1;
 	domain->geometry.force_aperture = true;
 
+	/*
+	 * Non-secure SMMU: TrustZone does not set up the global space, so halt
+	 * the MMU and (once) reset + enable it before programming any context.
+	 */
+	if (qcom_iommu->nonsecure) {
+		ret = qcom_iommu_glb_halt(qcom_iommu);
+		if (ret)
+			goto out_clear_iommu;
+		if (!qcom_iommu->glb_inited) {
+			qcom_iommu_glb_reset(qcom_iommu);
+			qcom_iommu->glb_inited = true;
+		}
+	}
+
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
-		if (!ctx->secure_init) {
+		if (!ctx->secure_init && qcom_iommu_has_secure_context(qcom_iommu)) {
 			ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, ctx->asid);
 			if (ret) {
 				dev_err(qcom_iommu->dev, "secure init failed: %d\n", ret);
@@ -267,6 +463,13 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			continue;
 		}
 
+		/*
+		 * Non-secure: program the stream match and context-bank
+		 * attribution that TrustZone would own for a secure SMMU.
+		 */
+		if (qcom_iommu->nonsecure)
+			qcom_iommu_glb_program_ctx(qcom_iommu, ctx);
+
 		/* Disable context bank before programming */
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
 
@@ -280,9 +483,17 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 				FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
 		iommu_writeq(ctx, ARM_SMMU_CB_TTBR1, 0);
 
-		/* TCR */
-		iommu_writel(ctx, ARM_SMMU_CB_TCR2,
-				arm_smmu_lpae_tcr2(&pgtbl_cfg));
+		/*
+		 * TCR2 (CB offset 0x10) does not exist on the MSM8974 QSMMU-v2
+		 * context bank -- the downstream msm-iommu-v1 driver never writes
+		 * it, and writing it here faults and resets the SoC. Skip it on
+		 * the non-secure (msm8974) path; the PA-size/SEP it would carry is
+		 * conveyed by TCR on this IP.
+		 */
+		if (!qcom_iommu->nonsecure) {
+			iommu_writel(ctx, ARM_SMMU_CB_TCR2,
+					arm_smmu_lpae_tcr2(&pgtbl_cfg));
+		}
 		iommu_writel(ctx, ARM_SMMU_CB_TCR,
 			     arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE);
 
@@ -294,9 +505,23 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		/* SCTLR */
 		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
-		      ARM_SMMU_SCTLR_AFE | ARM_SMMU_SCTLR_TRE |
+		      ARM_SMMU_SCTLR_TRE |
 		      ARM_SMMU_SCTLR_M | ARM_SMMU_SCTLR_S1_ASIDPNE |
 		      ARM_SMMU_SCTLR_CFCFG;
+
+		/*
+		 * The MSM8974 QSMMU-v2 raises an Access-Flag Fault (FSR.AFF) on
+		 * the first stage-1 walk even with SCTLR.AFE cleared -- unlike
+		 * the ARM SMMU architectural behaviour, clearing AFE alone does
+		 * not disable AF faulting on this IP. Set the Qualcomm-specific
+		 * AFFD (Access-Flag-Fault-Disable) bit instead. The secure path
+		 * (msm8916 etc.) keeps the architectural AFE and does not touch
+		 * the vendor AFFD bit.
+		 */
+		if (qcom_iommu->nonsecure)
+			reg |= ARM_SMMU_SCTLR_AFFD;
+		else
+			reg |= ARM_SMMU_SCTLR_AFE;
 
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
 			reg |= ARM_SMMU_SCTLR_E;
@@ -304,6 +529,10 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
 
 		ctx->domain = domain;
+	}
+
+	if (qcom_iommu->nonsecure) {
+		qcom_iommu_glb_resume(qcom_iommu);
 	}
 
 	mutex_unlock(&qcom_domain->init_mutex);
@@ -371,7 +600,9 @@ static int qcom_iommu_attach_dev(struct iommu_domain *domain, struct device *dev
 	}
 
 	/* Ensure that the domain is finalized */
-	pm_runtime_get_sync(qcom_iommu->dev);
+	ret = pm_runtime_resume_and_get(qcom_iommu->dev);
+	if (ret < 0)
+		return ret;
 	ret = qcom_iommu_init_domain(domain, qcom_iommu, dev);
 	pm_runtime_put_sync(qcom_iommu->dev);
 	if (ret < 0)
@@ -701,10 +932,17 @@ static int qcom_iommu_ctx_probe(struct platform_device *pdev)
 		ctx->secured_ctx = true;
 
 	/* clear IRQs before registering fault handler, just in case the
-	 * boot-loader left us a surprise:
+	 * boot-loader left us a surprise.  Enable clocks via the parent
+	 * device's PM runtime to avoid unclocked MMSS register accesses
+	 * which cause a bus error on MSM8974.
 	 */
-	if (!ctx->secured_ctx)
+	if (!ctx->secured_ctx) {
+		ret = pm_runtime_resume_and_get(dev->parent);
+		if (ret < 0)
+			return ret;
 		iommu_writel(ctx, ARM_SMMU_CB_FSR, iommu_readl(ctx, ARM_SMMU_CB_FSR));
+		pm_runtime_put_sync(dev->parent);
+	}
 
 	ret = devm_request_irq(dev, irq,
 			       qcom_iommu_fault,
@@ -823,10 +1061,34 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	}
 	qcom_iommu->clks[CLK_TBU].clk = clk;
 
+	clk = devm_clk_get_optional(dev, "mmssnoc");
+	if (IS_ERR(clk)) {
+		dev_err(dev, "failed to get mmssnoc clock\n");
+		return PTR_ERR(clk);
+	}
+	qcom_iommu->clks[CLK_MMSSNOC].clk = clk;
+
+	/*
+	 * Optional MMSS<->EBI interconnect. of_icc_get() returns NULL when the
+	 * node has no "interconnects" property, so this is a no-op everywhere
+	 * except SoCs that need the bus vote (MSM8974).
+	 */
+	qcom_iommu->icc_path = devm_of_icc_get(dev, NULL);
+	if (IS_ERR(qcom_iommu->icc_path))
+		return dev_err_probe(dev, PTR_ERR(qcom_iommu->icc_path),
+				     "failed to get interconnect path\n");
+
 	if (of_property_read_u32(dev->of_node, "qcom,iommu-secure-id",
 				 &qcom_iommu->sec_id)) {
-		dev_err(dev, "missing qcom,iommu-secure-id property\n");
-		return -ENODEV;
+		/*
+		 * A non-secure IOMMU (e.g. the MSM8974 GPU/Venus SMMUs) has no
+		 * TrustZone-owned stream mapping: HLOS programs it directly and
+		 * no restore_sec_cfg()/secure page-table pool is needed. All
+		 * secure-only paths below are gated by
+		 * qcom_iommu_has_secure_context(), so sec_id stays unused here.
+		 */
+		qcom_iommu->sec_id = -1;
+		qcom_iommu->nonsecure = true;
 	}
 
 	if (qcom_iommu_has_secure_context(qcom_iommu)) {
@@ -861,8 +1123,10 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		goto err_pm_disable;
 	}
 
-	if (qcom_iommu->local_base) {
-		pm_runtime_get_sync(dev);
+	if (qcom_iommu->local_base && qcom_iommu_has_secure_context(qcom_iommu)) {
+		ret = pm_runtime_resume_and_get(dev);
+		if (ret < 0)
+			goto err_pm_disable;
 		writel_relaxed(0xffffffff, qcom_iommu->local_base + SMMU_INTR_SEL_NS);
 		pm_runtime_put_sync(dev);
 	}
@@ -884,18 +1148,105 @@ static void qcom_iommu_device_remove(struct platform_device *pdev)
 	iommu_device_unregister(&qcom_iommu->iommu);
 }
 
+/*
+ * Re-apply the global space and every attached context bank after the SMMU
+ * has lost power. On MSM8974 the non-secure GPU SMMU shares the GPU power
+ * domain, so when the GPU runtime-suspends the SMMU is power-collapsed and
+ * all of its registers reset. The secure path is restored by TrustZone
+ * (qcom_scm_restore_sec_cfg); the non-secure path must re-establish the
+ * global control/stream mapping and each context bank itself, or the next
+ * GPU access silently stalls with translation disabled (no fault, just a
+ * hang) -- the classic "second submit after idle wedges the GPU".
+ */
+static void qcom_iommu_nonsecure_restore(struct qcom_iommu_dev *qcom_iommu)
+{
+	int i;
+
+	if (!qcom_iommu->nonsecure || !qcom_iommu->glb_inited)
+		return;
+
+	qcom_iommu_glb_halt(qcom_iommu);
+	qcom_iommu_glb_reset(qcom_iommu);
+
+	for (i = 0; i <= qcom_iommu->max_asid; i++) {
+		struct qcom_iommu_ctx *ctx = qcom_iommu->ctxs[i];
+		struct qcom_iommu_domain *qcom_domain;
+		struct io_pgtable_cfg *cfg;
+		u32 reg;
+
+		if (!ctx || !ctx->domain)
+			continue;
+		qcom_domain = to_qcom_iommu_domain(ctx->domain);
+		if (!qcom_domain->pgtbl_ops)
+			continue;
+		cfg = &io_pgtable_ops_to_pgtable(qcom_domain->pgtbl_ops)->cfg;
+
+		qcom_iommu_glb_program_ctx(qcom_iommu, ctx);
+
+		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_FAR, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_FSR, ARM_SMMU_CB_FSR_FAULT);
+		iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
+			     cfg->arm_lpae_s1_cfg.ttbr |
+			     FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
+		iommu_writeq(ctx, ARM_SMMU_CB_TTBR1, 0);
+		iommu_writel(ctx, ARM_SMMU_CB_TCR,
+			     arm_smmu_lpae_tcr(cfg) | ARM_SMMU_TCR_EAE);
+		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
+			     cfg->arm_lpae_s1_cfg.mair);
+		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
+			     cfg->arm_lpae_s1_cfg.mair >> 32);
+
+		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
+		      ARM_SMMU_SCTLR_TRE | ARM_SMMU_SCTLR_M |
+		      ARM_SMMU_SCTLR_S1_ASIDPNE | ARM_SMMU_SCTLR_CFCFG |
+		      ARM_SMMU_SCTLR_AFFD;
+		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
+			reg |= ARM_SMMU_SCTLR_E;
+		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
+	}
+
+	qcom_iommu_glb_resume(qcom_iommu);
+}
+
 static int __maybe_unused qcom_iommu_resume(struct device *dev)
 {
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
 	int ret;
 
+	/*
+	 * Vote the MMSS<->EBI interconnect up before enabling clocks or
+	 * touching any SMMU register. On MSM8974 the SMMU's AXI master is
+	 * otherwise un-arbitrated on the multimedia NoC and the first
+	 * register access raises a NoC/xPU error that resets the SoC. No-op
+	 * where icc_path is NULL (SoCs without an "interconnects" property).
+	 */
+	if (qcom_iommu->icc_path) {
+		ret = icc_set_bw(qcom_iommu->icc_path, 0, MBps_to_icc(150));
+		if (ret)
+			return ret;
+	}
+
 	ret = clk_bulk_prepare_enable(CLK_NUM, qcom_iommu->clks);
 	if (ret < 0)
-		return ret;
+		goto err_icc;
 
-	if (dev->pm_domain)
-		return qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
+	if (dev->pm_domain && qcom_iommu_has_secure_context(qcom_iommu)) {
+		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
+		if (ret)
+			goto err_clk;
+	}
 
+	/* Non-secure: re-establish SMMU state lost to power collapse. */
+	qcom_iommu_nonsecure_restore(qcom_iommu);
+
+	return 0;
+
+err_clk:
+	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
+err_icc:
+	if (qcom_iommu->icc_path)
+		icc_set_bw(qcom_iommu->icc_path, 0, 0);
 	return ret;
 }
 
@@ -904,6 +1255,8 @@ static int __maybe_unused qcom_iommu_suspend(struct device *dev)
 	struct qcom_iommu_dev *qcom_iommu = dev_get_drvdata(dev);
 
 	clk_bulk_disable_unprepare(CLK_NUM, qcom_iommu->clks);
+	if (qcom_iommu->icc_path)
+		icc_set_bw(qcom_iommu->icc_path, 0, 0);
 
 	return 0;
 }

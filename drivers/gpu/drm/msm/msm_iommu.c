@@ -11,6 +11,10 @@
 #include "msm_gpu_trace.h"
 #include "msm_mmu.h"
 
+#ifdef CONFIG_ARM_DMA_USE_IOMMU
+#include <asm/dma-iommu.h>
+#endif
+
 struct msm_iommu {
 	struct msm_mmu base;
 	struct iommu_domain *domain;
@@ -745,6 +749,18 @@ struct msm_mmu *msm_iommu_new(struct device *dev, unsigned long quirks)
 	msm_mmu_init(&iommu->base, dev, &funcs, MSM_MMU_IOMMU);
 
 	mutex_init(&iommu->init_lock);
+
+#ifdef CONFIG_ARM_DMA_USE_IOMMU
+	/*
+	 * On ARM32 the legacy DMA-IOMMU layer (arm_setup_iommu_dma_ops) attaches
+	 * an unmanaged mapping to every IOMMU-mapped device during DMA-ops setup.
+	 * That occupies the group with a non-default domain, so our own
+	 * iommu_attach_device() below would fail with -EBUSY. Detach it first;
+	 * the GPU manages its own domain and does not use the DMA-IOMMU layer.
+	 */
+	if (to_dma_iommu_mapping(dev))
+		arm_iommu_detach_device(dev);
+#endif
 
 	ret = iommu_attach_device(iommu->domain, dev);
 	if (ret) {

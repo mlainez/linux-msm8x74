@@ -24,6 +24,7 @@ properties:
               - qcom,msm8917-iommu
               - qcom,msm8937-iommu
               - qcom,msm8953-iommu
+              - qcom,msm8974-iommu
           - const: qcom,msm-iommu-v1
       - items:
           - enum:
