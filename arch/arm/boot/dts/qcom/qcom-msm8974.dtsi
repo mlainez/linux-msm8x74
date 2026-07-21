@@ -3728,6 +3728,35 @@
 			};
 		};
 
+		mdp_iommu: iommu@fd928000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
+			ranges = <0 0xfd928000 0x10000>;
+			clocks = <&mmcc MDSS_AHB_CLK>,
+				 <&mmcc MDSS_AXI_CLK>;
+			clock-names = "iface", "bus";
+			power-domains = <&mmcc MDSS_GDSC>;
+			qcom,iommu-secure-id = <1>;
+			/*
+			 * The MDP SMMU has TrustZone-secured context banks. On a
+			 * headless board the display is unused, so leave this IOMMU
+			 * disabled: its context-bank probe must not touch the secured
+			 * SMMU (SCM restore_sec_cfg + register access) at boot, which
+			 * faults the un-arbitrated MMSS bus and resets the SoC.
+			 * Boards with a panel re-enable it via the display overlay.
+			 */
+			status = "disabled";
+
+			/* mdp_0 non-secure context bank (asid 8) */
+			iommu-ctx@8000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x8000 0x1000>;
+				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
 		cci: cci@fda0c000 {
 			compatible = "qcom,msm8974-cci";
 			#address-cells = <1>;
@@ -3783,7 +3812,7 @@
 					<&ocmemnoc OCMEM_VNOC_MAS_GFX3D &ocmemnoc OCMEM_SLV_OCMEM>;
 			interconnect-names = "gfx-mem", "ocmem";
 
-			// iommus = <&gpu_iommu 0>;
+			iommus = <&gpu_iommu 0>, <&gpu_iommu 1>;
 
 			status = "disabled";
 
@@ -3801,6 +3830,104 @@
 				opp-27000000 {
 					opp-hz = /bits/ 64 <27000000>;
 				};
+			};
+		};
+
+		gpu_iommu: iommu@fdb10000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
+			/*
+			 * Global register window. On a non-secure SMMU HLOS must
+			 * program the global space (SMR/S2CR/CBAR/CR0) itself, so
+			 * map it here. Context banks live at +0x8000 (see ranges),
+			 * so the global window is the first 0x8000.
+			 */
+			reg = <0xfdb10000 0x8000>;
+			ranges = <0 0xfdb18000 0x10000>;
+			clocks = <&mmcc OXILICX_AHB_CLK>,
+				 <&mmcc OXILICX_AXI_CLK>,
+				 <&mmcc OXILI_GFX3D_CLK>,
+				 <&mmcc MMSS_S0_AXI_CLK>;
+			clock-names = "iface", "bus", "tbu", "mmssnoc";
+			power-domains = <&mmcc OXILICX_GDSC>;
+			/*
+			 * The Adreno GPU SMMU is non-secure: HLOS programs the stream
+			 * mapping and page tables directly, with no TrustZone path.
+			 * Do NOT set qcom,iommu-secure-id here (downstream does not) --
+			 * a spurious restore_sec_cfg() SCM call faults on this SoC.
+			 */
+
+			/* GFX3D_USER */
+			iommu-ctx@0 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x0 0x1000>;
+				interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			/* GFX3D_PRIV */
+			iommu-ctx@1000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x1000 0x1000>;
+				interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>;
+			};
+
+			/* GFX3D_SPARE */
+			iommu-ctx@2000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x2000 0x1000>;
+				interrupts = <GIC_SPI 241 IRQ_TYPE_LEVEL_HIGH>;
+			};
+		};
+
+		venus: video-codec@fdc00000 {
+			compatible = "qcom,msm8974-venus", "qcom,msm8916-venus";
+			reg = <0xfdc00000 0xff000>;
+			interrupts = <GIC_SPI 44 IRQ_TYPE_LEVEL_HIGH>;
+			clocks = <&mmcc VENUS0_VCODEC0_CLK>,
+				 <&mmcc VENUS0_AHB_CLK>,
+				 <&mmcc VENUS0_AXI_CLK>;
+			clock-names = "core", "iface", "bus";
+			power-domains = <&mmcc VENUS0_GDSC>;
+			iommus = <&venus_iommu 8>;
+			memory-region = <&venus_region>;
+			status = "disabled";
+
+			video-decoder {
+				compatible = "venus-decoder";
+			};
+
+			video-encoder {
+				compatible = "venus-encoder";
+			};
+		};
+
+		venus_iommu: iommu@fdc84000 {
+			#address-cells = <1>;
+			#size-cells = <1>;
+			#iommu-cells = <1>;
+			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
+			ranges = <0 0xfdc84000 0x10000>;
+			clocks = <&mmcc VENUS0_AHB_CLK>,
+				 <&mmcc VENUS0_AXI_CLK>;
+			clock-names = "iface", "bus";
+			power-domains = <&mmcc VENUS0_GDSC>;
+			qcom,iommu-secure-id = <0>;
+			/*
+			 * Disabled during GPU IOMMU bring-up. This node still takes
+			 * the secure TrustZone path (restore_sec_cfg) which faults
+			 * and resets the SoC on this platform, and its consumer (the
+			 * Venus codec) is disabled anyway. Re-enable as non-secure
+			 * once the GPU path is validated.
+			 */
+			status = "disabled";
+
+			/* venus_ns non-secure context bank */
+			iommu-ctx@8000 {
+				compatible = "qcom,msm-iommu-v1-ns";
+				reg = <0x8000 0x1000>;
+				interrupts = <GIC_SPI 42 IRQ_TYPE_LEVEL_HIGH>;
 			};
 		};
 
