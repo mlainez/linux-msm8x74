@@ -32,6 +32,7 @@
 
 &gpu {
 	compatible = "qcom,adreno-330.2", "qcom,adreno", "amd,imageon";
+	status = "okay";
 };
 
 /*
