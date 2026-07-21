@@ -69,6 +69,7 @@ struct msm_gpu *adreno_load_gpu(struct drm_device *dev)
 	struct platform_device *pdev = priv->gpu_pdev;
 	struct msm_gpu *gpu = NULL;
 	struct adreno_gpu *adreno_gpu;
+	bool rpm_enabled_here = false;
 	int ret;
 
 	if (pdev)
@@ -99,9 +100,15 @@ struct msm_gpu *adreno_load_gpu(struct drm_device *dev)
 
 	/*
 	 * Now that we have firmware loaded, and are ready to begin
-	 * booting the gpu, go ahead and enable runpm:
+	 * booting the gpu, go ahead and enable runpm -- unless it was
+	 * already enabled at probe time (see adreno_bind()), in which
+	 * case the enable/disable pair here must be skipped to keep the
+	 * disable_depth balanced:
 	 */
-	pm_runtime_enable(&pdev->dev);
+	if (!pm_runtime_enabled(&pdev->dev)) {
+		pm_runtime_enable(&pdev->dev);
+		rpm_enabled_here = true;
+	}
 
 	ret = pm_runtime_get_sync(&pdev->dev);
 	if (ret < 0) {
@@ -130,9 +137,21 @@ struct msm_gpu *adreno_load_gpu(struct drm_device *dev)
 	return gpu;
 
 err_put_rpm:
+	/*
+	 * A failed hw_init can leave the CP wedged mid-ring-fetch ("timeout
+	 * waiting to drain ringbuffer") with an AXI transaction outstanding.
+	 * Power-collapsing the GPU in that state can lock up the interconnect
+	 * and eventually reset the SoC silently.  Soft-reset the GPU while it
+	 * is still powered so nothing is in flight when the domain goes down.
+	 */
+	if (gpu->funcs->soft_reset) {
+		DRM_DEV_INFO(dev->dev, "resetting GPU before power collapse\n");
+		gpu->funcs->soft_reset(gpu);
+	}
 	pm_runtime_put_sync_suspend(&pdev->dev);
 err_disable_rpm:
-	pm_runtime_disable(&pdev->dev);
+	if (rpm_enabled_here)
+		pm_runtime_disable(&pdev->dev);
 
 	return NULL;
 }
@@ -244,6 +263,31 @@ static int adreno_bind(struct device *dev, struct device *master, void *data)
 	ret = dev_pm_opp_of_find_icc_paths(dev, NULL);
 	if (ret)
 		return ret;
+
+	/*
+	 * On a3xx the runtime-PM callbacks are pure clock/regulator/devfreq
+	 * operations (msm_gpu_pm_resume/suspend) and need no firmware, so
+	 * runtime PM can be enabled right at probe instead of at first open.
+	 *
+	 * Keeping it disabled until first open pins the GPU power domain on:
+	 * a runtime-PM-disabled device never counts as suspended for genpd
+	 * (pm_runtime_suspended() is false while disable_depth > 0), so the
+	 * GDSC that platform_probe() powered on can never be powered off
+	 * again.  On msm8974 that leaves OXILICX/OXILI on, unclocked and
+	 * unvoted, from probe until first open -- a state the SoC's idle
+	 * power management does not tolerate.
+	 *
+	 * The device stays RPM_SUSPENDED here, so this does not power
+	 * anything up, and the first pm_runtime_get_sync() at open still
+	 * resumes suppliers (the GPU IOMMU) before the GPU itself, exactly
+	 * as with the deferred enable.  adreno_load_gpu() skips its own
+	 * pm_runtime_enable/disable pair when this one is in effect.
+	 *
+	 * Families that need firmware in their runtime-resume path (GMU,
+	 * zap shader) keep the deferred first-open enable.
+	 */
+	if (info->family == ADRENO_3XX)
+		pm_runtime_enable(dev);
 
 	return 0;
 }
