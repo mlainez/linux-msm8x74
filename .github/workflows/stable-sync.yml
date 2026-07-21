@@ -1,0 +1,78 @@
+name: stable-sync
+
+# Keep 6.18/staging and 6.18/rc up to date with mainline LTS security
+# patches (linux-6.18.y). Clean merges are pushed directly; a conflict
+# opens an issue and leaves the branch untouched (resolve it manually on
+# a topic/integration round). See AGENTS.md §5.
+
+on:
+  schedule:
+    - cron: '17 4 * * *'   # daily, 04:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  group: stable-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    strategy:
+      max-parallel: 1        # staging first, then rc — never in parallel
+      matrix:
+        branch: ['6.18/staging', '6.18/rc']
+    steps:
+      - name: Checkout ${{ matrix.branch }}
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.branch }}
+          fetch-depth: 0
+          filter: blob:none
+
+      - name: Fetch stable linux-6.18.y
+        run: |
+          git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
+          git fetch --no-tags stable linux-6.18.y
+
+      - name: Merge stable into ${{ matrix.branch }}
+        id: merge
+        run: |
+          git config user.name  "stable-sync bot"
+          git config user.email "stable-sync@users.noreply.github.com"
+          BEFORE=$(git rev-parse HEAD)
+          STABLE=$(git rev-parse FETCH_HEAD)
+          STABLE_DESC=$(git describe --tags "$STABLE" 2>/dev/null || echo "$STABLE")
+          echo "stable_desc=$STABLE_DESC" >> "$GITHUB_OUTPUT"
+          if git merge-base --is-ancestor "$STABLE" HEAD; then
+            echo "result=up-to-date" >> "$GITHUB_OUTPUT"
+            echo "Already contains $STABLE_DESC — nothing to do."
+            exit 0
+          fi
+          if git merge --no-edit -m "Merge stable $STABLE_DESC into ${{ matrix.branch }}" FETCH_HEAD; then
+            echo "result=merged" >> "$GITHUB_OUTPUT"
+            git log --oneline "$BEFORE..HEAD" | head -20
+          else
+            git merge --abort
+            echo "result=conflict" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push
+        if: steps.merge.outputs.result == 'merged'
+        run: git push origin HEAD:${{ matrix.branch }}
+
+      - name: Open conflict issue
+        if: steps.merge.outputs.result == 'conflict'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          TITLE="stable-sync: conflict merging ${{ steps.merge.outputs.stable_desc }} into ${{ matrix.branch }}"
+          if gh issue list --state open --search "$TITLE" --json title -q '.[].title' | grep -qF "$TITLE"; then
+            echo "Issue already open."
+          else
+            gh issue create --title "$TITLE" --body \
+              "Automated merge of stable \`linux-6.18.y\` (${{ steps.merge.outputs.stable_desc }}) into \`${{ matrix.branch }}\` hit conflicts and was aborted. Resolve manually per AGENTS.md §5, then re-run the workflow."
+          fi
