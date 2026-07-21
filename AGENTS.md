@@ -186,9 +186,9 @@ when work from this fork is submitted **upstream**:
   suites (`kernel-test-iommu`, `-dvfs`, `-thermal`, `-voltage`) plus the
   `gpu-iommu-submit` helper and `adsp_sensors_demo`. Validate per the §1.1
   gates.
-- CI builds every push to `6.18/*` (see `.github/workflows/build-test.yml`)
-  with the config snapshot at `.github/ci/linux.config` — keep that snapshot
-  in sync when buildroot's `linux.config` changes.
+- Debian/Ubuntu kernel packages are built by the `Citronics/citronics-kernel`
+  project from `<kver>/rc` and `<kver>/release` (see its `kernels.conf`); this
+  repo carries no kernel-build CI of its own.
 
 ---
 
