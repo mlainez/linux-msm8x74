@@ -363,6 +363,13 @@ static int a3xx_hw_init(struct msm_gpu *gpu)
 	return a3xx_me_init(gpu) ? 0 : -EINVAL;
 }
 
+static void a3xx_soft_reset(struct msm_gpu *gpu)
+{
+	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 1);
+	gpu_read(gpu, REG_A3XX_RBBM_SW_RESET_CMD);
+	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 0);
+}
+
 static void a3xx_recover(struct msm_gpu *gpu)
 {
 	int i;
@@ -378,9 +385,7 @@ static void a3xx_recover(struct msm_gpu *gpu)
 	if (hang_debug)
 		a3xx_dump(gpu);
 
-	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 1);
-	gpu_read(gpu, REG_A3XX_RBBM_SW_RESET_CMD);
-	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 0);
+	a3xx_soft_reset(gpu);
 	adreno_recover(gpu);
 }
 
@@ -516,6 +521,7 @@ static const struct adreno_gpu_funcs funcs = {
 		.pm_suspend = msm_gpu_pm_suspend,
 		.pm_resume = msm_gpu_pm_resume,
 		.recover = a3xx_recover,
+		.soft_reset = a3xx_soft_reset,
 		.submit = a3xx_submit,
 		.active_ring = adreno_active_ring,
 		.irq = a3xx_irq,
