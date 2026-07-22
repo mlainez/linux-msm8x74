@@ -577,6 +577,18 @@ static int qcom_sns_reg_probe(struct auxiliary_device *auxdev,
 			refcount_set(&__qcom_sns_reg_data->refcnt, 1);
 
 			ret = qcom_sns_reg_probe_once(auxdev);
+			if (ret) {
+				/*
+				 * probe_once failed before qmi_handle_init()
+				 * (e.g. missing registry firmware). The global
+				 * must not survive in this half-initialized
+				 * state: qcom_sns_reg_maybe_start() would run
+				 * qmi_add_server() on the uninitialized QMI
+				 * handle and oops on its zeroed list heads.
+				 */
+				__qcom_sns_reg_data = NULL;
+				kfree(data);
+			}
 		}
 	} else {
 		/* For 2nd, 3rd,.. init just increase reference count */
