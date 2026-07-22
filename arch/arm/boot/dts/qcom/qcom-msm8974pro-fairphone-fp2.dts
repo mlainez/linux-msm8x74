@@ -102,44 +102,77 @@
 };
 
 &cpu_alert0 {
-	temperature = <70000>;
-	hysteresis = <3000>;
+	temperature = <90000>;
+	hysteresis = <10000>;
 };
 
 &cpu_crit0 {
-	temperature = <95000>;
+	temperature = <105000>;
 	hysteresis = <3000>;
 };
 
 &cpu_alert1 {
-	temperature = <70000>;
-	hysteresis = <3000>;
+	temperature = <90000>;
+	hysteresis = <10000>;
 };
 
 &cpu_crit1 {
-	temperature = <95000>;
+	temperature = <105000>;
 	hysteresis = <3000>;
 };
 
 &cpu_alert2 {
-	temperature = <70000>;
-	hysteresis = <3000>;
+	temperature = <90000>;
+	hysteresis = <10000>;
 };
 
 &cpu_crit2 {
-	temperature = <95000>;
+	temperature = <105000>;
 	hysteresis = <3000>;
 };
 
 &cpu_alert3 {
-	temperature = <70000>;
-	hysteresis = <3000>;
+	temperature = <90000>;
+	hysteresis = <10000>;
 };
 
 &cpu_crit3 {
-	temperature = <95000>;
+	temperature = <105000>;
 	hysteresis = <3000>;
 };
+
+/*
+ * Raise the CPU frequency floor to 729.6 MHz. The stock Android BSP never
+ * throttled below 960 MHz; letting the thermal governor (or the cpufreq
+ * governor at idle) collapse to 300 MHz makes the device unusably slow for
+ * no meaningful thermal or power win on this board. Disabling the OPPs
+ * below the floor raises both the idle minimum and the deepest thermal
+ * throttle step in one place, for every consumer of this DTB.
+ */
+&{/opp-table-cpu/opp-300000000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-345600000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-422400000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-499200000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-576000000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-652800000} {
+	status = "disabled";
+};
+
 
 &blsp1_uart2 {
 	status = "okay";
