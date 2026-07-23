@@ -563,3 +563,14 @@
 	extcon = <&smbb>;
 	qcom,init-seq = /bits/ 8 <0x1 0x64>;
 };
+
+/*
+ * Krait gang-rail safety margin. These boards have a decade of silicon
+ * aging behind them; at the nominal fused PVS voltages (speed3-pvs5-v1
+ * measured on the reference unit) the SoC silently brownout-resets
+ * within minutes at the higher OPPs (reproduced at 1.49 GHz / 890 mV,
+ * stable at 729.6 MHz / 800 mV). Add headroom to every CPU setpoint.
+ */
+&saw_l2 {
+	qcom,vdd-margin-microvolt = <50000>;
+};
