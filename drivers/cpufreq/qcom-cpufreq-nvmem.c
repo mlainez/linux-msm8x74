@@ -406,6 +406,17 @@ static const struct qcom_cpufreq_match_data match_data_kryo = {
 
 static const struct qcom_cpufreq_match_data match_data_krait = {
 	.get_version = qcom_cpufreq_krait_name_version,
+	/*
+	 * The L2 cache logic and the HFPLL digital logic sit on the VDDCX
+	 * rail. Downstream votes the CX corner up as the CPU/L2 clocks
+	 * scale (qcom,l2-fmax + hfpll-dig-supply); without an equivalent
+	 * vote the higher OPPs run the PLL/L2 logic on whatever low corner
+	 * the remote subsystems happen to request, and the SoC silently
+	 * brownout-resets minutes into DVFS operation. Attach the CX power
+	 * domain so the required-opps in the OPP table scale the corner.
+	 */
+	.pd_names = (const char *[]) { "cx" },
+	.num_pd_names = 1,
 };
 
 static const struct qcom_cpufreq_match_data match_data_msm8909 = {

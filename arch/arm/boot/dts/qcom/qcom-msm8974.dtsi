@@ -50,6 +50,8 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
+			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -66,6 +68,8 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
+			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -82,6 +86,8 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
+			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -98,6 +104,8 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
+			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
 		};
@@ -126,6 +134,7 @@
 
 		opp-300000000 {
 			opp-hz = /bits/ 64 <300000000>;
+			required-opps = <&rpmpd_opp_svs_soc>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <800000 800000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <775000 775000 1275000>;
@@ -178,6 +187,7 @@
 
 		opp-345600000 {
 			opp-hz = /bits/ 64 <345600000>;
+			required-opps = <&rpmpd_opp_svs_soc>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <810000 810000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <775000 775000 1275000>;
@@ -230,6 +240,7 @@
 
 		opp-422400000 {
 			opp-hz = /bits/ 64 <422400000>;
+			required-opps = <&rpmpd_opp_svs_soc>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <820000 820000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <775000 775000 1275000>;
@@ -282,6 +293,7 @@
 
 		opp-499200000 {
 			opp-hz = /bits/ 64 <499200000>;
+			required-opps = <&rpmpd_opp_svs_soc>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <830000 830000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <780000 780000 1275000>;
@@ -334,6 +346,7 @@
 
 		opp-576000000 {
 			opp-hz = /bits/ 64 <576000000>;
+			required-opps = <&rpmpd_opp_svs_soc>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <840000 840000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <790000 790000 1275000>;
@@ -386,6 +399,7 @@
 
 		opp-652800000 {
 			opp-hz = /bits/ 64 <652800000>;
+			required-opps = <&rpmpd_opp_nom>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <850000 850000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <800000 800000 1275000>;
@@ -438,6 +452,7 @@
 
 		opp-729600000 {
 			opp-hz = /bits/ 64 <729600000>;
+			required-opps = <&rpmpd_opp_nom>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <860000 860000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <810000 810000 1275000>;
@@ -490,6 +505,7 @@
 
 		opp-806400000 {
 			opp-hz = /bits/ 64 <806400000>;
+			required-opps = <&rpmpd_opp_nom>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <870000 870000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <820000 820000 1275000>;
@@ -542,6 +558,7 @@
 
 		opp-883200000 {
 			opp-hz = /bits/ 64 <883200000>;
+			required-opps = <&rpmpd_opp_nom>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <880000 880000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <830000 830000 1275000>;
@@ -594,6 +611,7 @@
 
 		opp-960000000 {
 			opp-hz = /bits/ 64 <960000000>;
+			required-opps = <&rpmpd_opp_nom>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <890000 890000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <840000 840000 1275000>;
@@ -646,6 +664,7 @@
 
 		opp-1036800000 {
 			opp-hz = /bits/ 64 <1036800000>;
+			required-opps = <&rpmpd_opp_nom>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <900000 900000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <850000 850000 1275000>;
@@ -698,6 +717,7 @@
 
 		opp-1113600000 {
 			opp-hz = /bits/ 64 <1113600000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <910000 910000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <865000 865000 1275000>;
@@ -750,6 +770,7 @@
 
 		opp-1190400000 {
 			opp-hz = /bits/ 64 <1190400000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <920000 920000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <875000 875000 1275000>;
@@ -802,6 +823,7 @@
 
 		opp-1267200000 {
 			opp-hz = /bits/ 64 <1267200000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <930000 930000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <890000 890000 1275000>;
@@ -854,6 +876,7 @@
 
 		opp-1344000000 {
 			opp-hz = /bits/ 64 <1344000000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <940000 940000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <900000 900000 1275000>;
@@ -906,6 +929,7 @@
 
 		opp-1420800000 {
 			opp-hz = /bits/ 64 <1420800000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <955000 955000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <915000 915000 1275000>;
@@ -958,6 +982,7 @@
 
 		opp-1497600000 {
 			opp-hz = /bits/ 64 <1497600000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <970000 970000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <925000 925000 1275000>;
@@ -1010,6 +1035,7 @@
 
 		opp-1574400000 {
 			opp-hz = /bits/ 64 <1574400000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <985000 985000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <940000 940000 1275000>;
@@ -1062,6 +1088,7 @@
 
 		opp-1651200000 {
 			opp-hz = /bits/ 64 <1651200000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1000000 1000000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <955000 955000 1275000>;
@@ -1114,6 +1141,7 @@
 
 		opp-1728000000 {
 			opp-hz = /bits/ 64 <1728000000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1015000 1015000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <970000 970000 1275000>;
@@ -1166,6 +1194,7 @@
 
 		opp-1804800000 {
 			opp-hz = /bits/ 64 <1804800000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1030000 1030000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <985000 985000 1275000>;
@@ -1218,6 +1247,7 @@
 
 		opp-1881600000 {
 			opp-hz = /bits/ 64 <1881600000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1045000 1045000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1000000 1000000 1275000>;
@@ -1270,6 +1300,7 @@
 
 		opp-1958400000 {
 			opp-hz = /bits/ 64 <1958400000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1060000 1060000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1015000 1015000 1275000>;
@@ -1322,6 +1353,7 @@
 
 		opp-2035200000 {
 			opp-hz = /bits/ 64 <2035200000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1075000 1075000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1030000 1030000 1275000>;
@@ -1374,6 +1406,7 @@
 
 		opp-2112000000 {
 			opp-hz = /bits/ 64 <2112000000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1090000 1090000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1045000 1045000 1275000>;
@@ -1426,6 +1459,7 @@
 
 		opp-2150400000 {
 			opp-hz = /bits/ 64 <2150400000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1105000 1105000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1060000 1060000 1275000>;
@@ -1478,6 +1512,7 @@
 
 		opp-2188800000 {
 			opp-hz = /bits/ 64 <2188800000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1105000 1105000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1060000 1060000 1275000>;
@@ -1530,6 +1565,7 @@
 
 		opp-2265600000 {
 			opp-hz = /bits/ 64 <2265600000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
 			opp-microvolt = <1120000 1120000 1275000>;
 			opp-microvolt-speed1-pvs0-v0 = <1075000 1075000 1275000>;
@@ -1582,6 +1618,7 @@
 
 		opp-2342400000 {
 			opp-hz = /bits/ 64 <2342400000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0x8>;
 			opp-microvolt-speed3-pvs0-v0 = <1080000 1080000 1275000>;
 			opp-microvolt-speed3-pvs1-v0 = <1055000 1055000 1275000>;
@@ -1610,6 +1647,7 @@
 
 		opp-2419200000 {
 			opp-hz = /bits/ 64 <2419200000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0x8>;
 			opp-microvolt-speed3-pvs0-v0 = <1095000 1095000 1275000>;
 			opp-microvolt-speed3-pvs1-v0 = <1070000 1070000 1275000>;
@@ -1638,6 +1676,7 @@
 
 		opp-2457600000 {
 			opp-hz = /bits/ 64 <2457600000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0x8>;
 			opp-microvolt-speed3-pvs0-v0 = <1100000 1100000 1275000>;
 			opp-microvolt-speed3-pvs1-v0 = <1075000 1075000 1275000>;
