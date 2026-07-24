@@ -72,9 +72,18 @@ Promotion is **evidence-driven**; each tier has a gate that must be passed
      with fence completion and a dmesg check, live sensor data, …);
    - **regression sweep** over everything previously working: GPU submit +
      0 IOMMU faults, modem/WCNSS/ADSP remoteprocs up, QRTR clean, network;
-   - **stability soak**: several minutes of growing uptime at idle (this SoC
-     resets *silently* — no panic on serial — when power/clock state is
-     wrong; a boot that "looks fine" for 60 s is not evidence).
+   - **stability soak**: **at least 60 minutes** of growing uptime at idle
+     with DVFS active (full frequency range, no pins), ideally overnight
+     before promoting to rc. This SoC resets *silently* — no panic on
+     serial — when power/clock state is wrong, and failure modes with a
+     5–20 min MTBF exist (the 2026-07 CX-corner bug passed every
+     "several minutes" soak and reset in the field within 19 minutes).
+     A boot that "looks fine" for 60 s is not evidence; neither is one
+     that looks fine for 10 minutes. Instrument soaks with a device-side
+     fsync'd log (uptime/freq/temps every 30 s) so a reset leaves
+     evidence, and check `journalctl --list-boots` for unexplained boots
+     (beware: no-RTC clock skew scrambles its timestamps after unclean
+     resets — trust per-boot journal tails, not the listed times).
 4. **rc → release**: human decision after wider testing; tag on release.
 
 If a gate fails, the offending topic gets fixed *on the topic branch* and
