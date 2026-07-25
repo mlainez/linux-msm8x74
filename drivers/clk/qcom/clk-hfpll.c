@@ -78,13 +78,13 @@ static void __clk_hfpll_enable(struct clk_hw *hw)
 	/* Wait for PLL to lock. */
 	if (hd->status_reg)
 		/*
-		 * Busy wait, with interrupts disabled: every caller holds
-		 * h->lock. A HFPLL locks in about 60 us - the delay the
-		 * status-less path below trusts blindly - so bound the poll
-		 * just above that instead of spinning for up to 100 ms.
+		 * Busy wait until the lock bit is set, with interrupts
+		 * disabled: every caller holds h->lock. A HFPLL locks in
+		 * about 60 us - the delay the status-less path below trusts
+		 * blindly - so 200 us leaves ample margin.
 		 */
 		regmap_read_poll_timeout_atomic(regmap, hd->status_reg, val,
-						!(val & BIT(hd->lock_bit)),
+						val & BIT(hd->lock_bit),
 						1, 200);
 	else
 		udelay(60);
