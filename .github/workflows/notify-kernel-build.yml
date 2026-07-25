@@ -3,8 +3,8 @@ name: notify-kernel-build
 # Every push to 6.18/rc (a promotion or an automated stable merge) tells
 # Citronics/citronics-kernel to build and release fresh deb packages.
 # Requires the KERNEL_DISPATCH_TOKEN secret: a PAT with permission to send
-# repository_dispatch to Citronics/citronics-kernel. Skips gracefully when
-# the secret is absent.
+# repository_dispatch to Citronics/citronics-kernel. Without the secret this
+# job FAILS on purpose - see the guard below.
 
 on:
   push:
@@ -23,8 +23,8 @@ jobs:
           KERNEL_DISPATCH_TOKEN: ${{ secrets.KERNEL_DISPATCH_TOKEN }}
         run: |
           if [ -z "$KERNEL_DISPATCH_TOKEN" ]; then
-            echo "KERNEL_DISPATCH_TOKEN not set — skipping dispatch"
-            exit 0
+            echo "::error::KERNEL_DISPATCH_TOKEN is not set: no kernel build was triggered for this push. Add the secret (a PAT that may send repository_dispatch to Citronics/citronics-kernel), or trigger the build by hand."
+            exit 1
           fi
           curl -sf -X POST \
             -H "Authorization: Bearer $KERNEL_DISPATCH_TOKEN" \
