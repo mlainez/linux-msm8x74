@@ -12,12 +12,39 @@
 #include <linux/reboot-mode.h>
 #include <linux/regmap.h>
 
+#define PON_REASON1			0x08
+#define PON_WARM_RESET_REASON1		0x0a
+#define PON_WARM_RESET_REASON2		0x0b
+#define PON_POFF_REASON1		0x0c
+#define PON_POFF_REASON2		0x0d
 #define PON_SOFT_RB_SPARE		0x8f
 
 #define GEN1_REASON_SHIFT		2
 #define GEN2_REASON_SHIFT		1
 
 #define NO_REASON_SHIFT			0
+
+/* Why the PMIC turned the system on. */
+static const char * const pon_reasons[] = {
+	"hard reset", "SMPL (momentary power loss)", "RTC alarm",
+	"DC charger", "USB charger", "PON1 (secondary PMIC)",
+	"CBL (external supply)", "KPD (power key)",
+};
+
+/*
+ * Why it turned the system off, i.e. how the *previous* boot ended. The
+ * interesting ones for post-mortems are UVLO (the PMIC dropped the SoC
+ * because a rail collapsed), PMIC watchdog and STAGE3 (a hang the hardware
+ * had to break), and the thermal entries.
+ */
+static const char * const poff_reasons[] = {
+	"SOFT (software)", "PS_HOLD (MSM-controlled shutdown)",
+	"PMIC watchdog", "GP1 (keypad reset 1)", "GP2 (keypad reset 2)",
+	"KPDPWR_AND_RESIN", "RESIN_N", "KPDPWR_N (long power key)",
+	NULL, NULL, NULL, "charger (ENUM_TIMER/BOOT_DONE)",
+	"TFT (thermal fault tolerance)", "UVLO (undervoltage lockout)",
+	"OTST3 (overtemp)", "STAGE3 reset",
+};
 
 struct pm8916_pon {
 	struct device *dev;
@@ -44,6 +71,63 @@ static int pm8916_reboot_mode_write(struct reboot_mode_driver *reboot,
 	return ret;
 }
 
+static void pm8916_pon_log_bits(struct pm8916_pon *pon, const char *what,
+			      unsigned int bits, const char * const *names,
+			      unsigned int num_names)
+{
+	unsigned int i;
+
+	if (!bits) {
+		dev_info(pon->dev, "%s: none (0x%02x)\n", what, bits);
+		return;
+	}
+
+	for (i = 0; i < num_names; i++) {
+		if (!(bits & BIT(i)) || !names[i])
+			continue;
+		dev_info(pon->dev, "%s: %s\n", what, names[i]);
+	}
+}
+
+/*
+ * Report why the system powered on and how the previous boot ended. On this
+ * hardware a failing rail or a hardware-broken hang leaves no trace in the
+ * kernel log at all - the PMIC just drops the SoC - so these registers are
+ * the only post-mortem evidence available after a silent reset.
+ */
+static void pm8916_pon_report_reasons(struct pm8916_pon *pon)
+{
+	unsigned int pon_reason, warm1, warm2, poff1, poff2;
+	int ret;
+
+	ret = regmap_read(pon->regmap, pon->baseaddr + PON_REASON1,
+			  &pon_reason);
+	if (ret) {
+		dev_warn(pon->dev, "cannot read the power-on reason: %d\n",
+			 ret);
+		return;
+	}
+	if (regmap_read(pon->regmap, pon->baseaddr + PON_WARM_RESET_REASON1,
+			&warm1) ||
+	    regmap_read(pon->regmap, pon->baseaddr + PON_WARM_RESET_REASON2,
+			&warm2) ||
+	    regmap_read(pon->regmap, pon->baseaddr + PON_POFF_REASON1,
+			&poff1) ||
+	    regmap_read(pon->regmap, pon->baseaddr + PON_POFF_REASON2,
+			&poff2))
+		return;
+
+	dev_info(pon->dev,
+		 "pon=0x%02x warm_reset=0x%02x%02x poff=0x%02x%02x\n",
+		 pon_reason, warm2, warm1, poff2, poff1);
+
+	pm8916_pon_log_bits(pon, "power-on", pon_reason, pon_reasons,
+			  ARRAY_SIZE(pon_reasons));
+	pm8916_pon_log_bits(pon, "previous power-off",
+			  poff1 | (poff2 << 8), poff_reasons,
+			  ARRAY_SIZE(poff_reasons));
+}
+
 static int pm8916_pon_probe(struct platform_device *pdev)
 {
 	struct pm8916_pon *pon;
@@ -66,6 +150,8 @@ static int pm8916_pon_probe(struct platform_device *pdev)
 				     &pon->baseaddr);
 	if (error)
 		return error;
+
+	pm8916_pon_report_reasons(pon);
 
 	reason_shift = (long)of_device_get_match_data(&pdev->dev);
 
