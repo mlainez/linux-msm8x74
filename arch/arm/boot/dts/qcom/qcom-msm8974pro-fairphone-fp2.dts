@@ -565,26 +565,13 @@
 };
 
 /*
- * Krait gang-rail safety margin, currently a measurement rather than a
- * settled value.
- *
- * The reference unit fuses as speed1-pvs12-v1 (socinfo MSM8974PRO-AA,
- * PTE_EFUSE at 0xfc4b80b0), and the per-bin column this kernel selects for
- * it matches the vendor table exactly, so the requested voltages are not
- * below vendor spec at any operating point. Despite that, the board still
- * resets with no kernel output under sustained four-core load, and it does
- * so at commanded voltages already above *every* vendor PVS bin for the
- * frequency involved: 900 mV at 806.4 MHz died after 42 s, 930 mV at
- * 1036.8 MHz after 334 s.
- *
- * Time-to-reset growing with commanded voltage is the reason this is set
- * high: if the trend continues, the rail is not delivering what the SAW
- * asks for under load (IR drop, SMPS current limit, or supply droop on the
- * carrier) and the defect is in delivery rather than in the table. 200 mV
- * keeps the top rung at 1240 mV, inside the 1275 mV ceiling the OPP table
- * declares, so no operating point becomes unrepresentable.
+ * Krait gang-rail safety margin. These boards have a decade of silicon
+ * aging behind them; the fused PVS table (speed3-pvs5-v1 on the reference
+ * unit) leaves no headroom for that, and the SoC then resets with no
+ * kernel output at all. 100 mV on every setpoint was needed: 50 mV kept
+ * an idle board alive for hours but still died within minutes under load.
  */
 &saw_l2 {
-	qcom,vdd-margin-microvolt = <200000>;
+	qcom,vdd-margin-microvolt = <100000>;
 };
 
