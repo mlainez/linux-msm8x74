@@ -118,6 +118,13 @@ static const struct regmap_config hfpll_regmap_config = {
 	.reg_stride	= 4,
 	.val_bits	= 32,
 	.max_register	= 0x30,
+	/*
+	 * The PLL is enabled, reprogrammed and polled for lock from
+	 * clk_hfpll_enable() and clk_hfpll_set_rate(), both of which hold
+	 * clk_hfpll::lock with interrupts disabled. Take a spinlock rather
+	 * than a mutex for register access so those paths stay atomic.
+	 */
+	.fast_io	= true,
 };
 
 static int qcom_hfpll_probe(struct platform_device *pdev)
