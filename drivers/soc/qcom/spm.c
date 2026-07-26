@@ -90,8 +90,12 @@ struct spm_driver_data {
 	const struct spm_reg_data *reg_data;
 	struct device *dev;
 	unsigned int volt_sel;
-	unsigned int margin_sel;
 	int reg_cpu;
+	/*
+	 * set_vdd() cannot return a value (it is an smp_call_func_t), so it
+	 * records the outcome here for spm_set_voltage_sel() to propagate.
+	 */
+	int set_vdd_ret;
 };
 
 static const u16 spm_reg_offset_v4_1[SPM_REG_NR] = {
@@ -218,7 +222,6 @@ static const u16 spm_reg_offset_v2_1_cpu[SPM_REG_NR] = {
 };
 
 static void smp_set_vdd_v1_1(void *data);
-static void smp_set_vdd_v2_1(void *data);
 
 static struct linear_range spm_v1_1_regulator_range =
 	REGULATOR_LINEAR_RANGE(700000, 0, 56, 12500);
@@ -230,13 +233,19 @@ static struct linear_range spm_v1_1_regulator_range =
 static struct linear_range spm_v2_1_regulator_range =
 	REGULATOR_LINEAR_RANGE(350000, 70, 255, 5000);
 
-/* SPM register data for 8974, 8084 per-CPU (no voltage control - L2 master handles it) */
+/*
+ * SPM register data for 8974, 8084 per-CPU.
+ *
+ * These SAWs run idle/sleep sequences only: on MSM8974 the L2/APCS SAW is the
+ * one wired to the PMIC over SPMI, and the vendor accordingly gives its per-CPU
+ * nodes no pmic-data at all.  Use the plain v2.1 offset table so PMIC_DATA_0/1
+ * are not even mapped here - the extended table plus a PMIC payload would let a
+ * per-CPU sequencer drive the shared Krait rail behind the regulator's back.
+ */
 static const struct spm_reg_data spm_reg_8974_8084_cpu  = {
-	.reg_offset = spm_reg_offset_v2_1_cpu,
+	.reg_offset = spm_reg_offset_v2_1,
 	.spm_cfg = 0x1,
 	.spm_dly = 0x3C102800,
-	.pmic_data[0] = 0x02030080,
-	.pmic_data[1] = 0x00030000,
 	.seq = { 0x03, 0x0B, 0x0F, 0x00, 0x20, 0x80, 0x10, 0xE8, 0x5B, 0x03,
 		0x3B, 0xE8, 0x5B, 0x82, 0x10, 0x0B, 0x30, 0x06, 0x26, 0x30,
 		0x0F },
@@ -361,19 +370,26 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
 
-	/* Board-level safety margin on top of the fused PVS table */
-	selector = min_t(unsigned int, selector + drv->margin_sel,
-			 drv->reg_data->range->max_sel);
-
 	drv->volt_sel = selector;
+	drv->set_vdd_ret = 0;
 
-	if (drv->reg_cpu >= 0)
-		return smp_call_function_single(drv->reg_cpu,
-						drv->reg_data->set_vdd,
-						drv, true);
+	if (drv->reg_cpu >= 0) {
+		int ret = smp_call_function_single(drv->reg_cpu,
+						  drv->reg_data->set_vdd,
+						  drv, true);
+		return ret ? : drv->set_vdd_ret;
+	}
 
 	drv->reg_data->set_vdd(drv);
-	return 0;
+
+	/*
+	 * Propagate a failed rail write.  Without this the OPP core sees
+	 * success and goes on to raise the clock, so a rail that never reached
+	 * the requested level is followed by a frequency the silicon has not
+	 * been given the voltage for.  The vendor driver returns -EIO here and
+	 * aborts the transition for the same reason.
+	 */
+	return drv->set_vdd_ret;
 }
 
 static int spm_get_voltage_sel(struct regulator_dev *rdev)
@@ -449,56 +465,6 @@ enable_avs:
 	}
 }
 
-static void smp_set_vdd_v2_1(void *data)
-{
-	struct spm_driver_data *drv = data;
-	unsigned int vctl, avs_ctl, pmic_sts;
-	unsigned int vlevel, volt_sel;
-	bool avs_enabled;
-
-	volt_sel = drv->volt_sel;
-	vlevel = volt_sel;
-
-	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
-	avs_enabled = avs_ctl & SPM_2_1_AVS_CTL_AVS_ENABLED;
-
-	if (avs_enabled) {
-		avs_ctl &= ~SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-
-	spm_register_write(drv, SPM_REG_RST, 1);
-
-	vctl = spm_register_read(drv, SPM_REG_VCTL);
-	vctl &= ~(SPM_2_1_VCTL_VLVL | SPM_2_1_VCTL_PORT);
-	vctl |= vlevel;
-	spm_register_write(drv, SPM_REG_VCTL, vctl);
-
-	if (read_poll_timeout_atomic(spm_register_read,
-				     pmic_sts,
-				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
-				     1, 200, false,
-				     drv, SPM_REG_PMIC_STS)) {
-		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
-				    pmic_sts & 0xff, vlevel);
-		goto enable_avs_v2_1;
-	}
-
-	if (avs_enabled) {
-		unsigned int max_avs = volt_sel;
-		unsigned int min_avs = max(max_avs, 4U) - 4;
-
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MIN_VLVL, min_avs);
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MAX_VLVL, max_avs);
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-
-enable_avs_v2_1:
-	if (avs_enabled) {
-		avs_ctl |= SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-}
 
 /*
  * smp_set_vdd_v2_1_l2 - Set voltage via L2/APCS SAW2 (MSM8974 gang supply).
@@ -547,23 +513,25 @@ static void smp_set_vdd_v2_1_l2(void *data)
 				     pmic_sts,
 				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
 				     1, 200, false,
-				     drv, SPM_REG_PMIC_STS))
+				     drv, SPM_REG_PMIC_STS)) {
 		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
 				    pmic_sts & 0xff, vlevel);
-
-	if (avs_enabled) {
-		unsigned int max_avs = volt_sel;
-		unsigned int min_avs = max(max_avs, 4U) - 4;
-
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MIN_VLVL, min_avs);
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MAX_VLVL, max_avs);
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
+		drv->set_vdd_ret = -ETIMEDOUT;
+		return;
 	}
 
-	if (avs_enabled) {
-		avs_ctl |= SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
+	/*
+	 * AVS is left disabled deliberately.  It is off by design on this SoC:
+	 * the vendor programs AVS_CTL/AVS_LIMIT to zero on every SAW at init
+	 * and never arms it.  The window this code used to rebuild cannot even
+	 * be expressed in the registers it writes - MIN_VLVL and MAX_VLVL are
+	 * 6 bits wide, inherited from v1.1 whose selectors fit, while a v2.1
+	 * selector reaches 255, so a window built from one is silently
+	 * truncated: selector 180 (900 mV) becomes 48 (240 mV), authorising the
+	 * hardware to track the shared Krait rail down to an arbitrary level
+	 * with no software involvement.
+	 */
+	drv->set_vdd_ret = 0;
 }
 
 static int spm_get_cpu(struct device *dev)
@@ -600,7 +568,6 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	};
 	struct regulator_desc *rdesc;
 	struct regulator_dev *rdev;
-	u32 margin_uV;
 	int ret;
 	bool found;
 
@@ -631,22 +598,6 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		dev_dbg(dev, "SAW2 L2 regulator (shared rail)\n");
 	}
 
-	/*
-	 * Optional board-level voltage margin added to every setpoint.
-	 * Aged silicon needs headroom above the fused PVS voltage table:
-	 * boards that have been in the field for years (Fairphone 2) brown
-	 * out at the nominal table values on the higher OPPs.
-	 */
-	if (!of_property_read_u32(dev->of_node, "qcom,vdd-margin-microvolt",
-				  &margin_uV)) {
-		drv->margin_sel = DIV_ROUND_UP(margin_uV,
-					       drv->reg_data->range->step);
-		dev_info(dev, "applying %u uV (%u step) rail margin\n",
-			 margin_uV, drv->margin_sel);
-	}
-
-	drv->volt_sel = DIV_ROUND_UP(drv->reg_data->init_uV - rdesc->min_uV,
-				     rdesc->uV_step);
 	ret = linear_range_get_selector_high(drv->reg_data->range,
 					     drv->reg_data->init_uV,
 					     &drv->volt_sel,
@@ -744,9 +695,14 @@ static int spm_dev_probe(struct platform_device *pdev)
 	 * CPU was held in reset, the reset signal could trigger the SPM state
 	 * machine, before the sequences are completely written.
 	 */
-	if (drv->reg_data->avs_ctl)
+	/*
+	 * Write these whenever the SoC maps them, rather than only when the
+	 * value is nonzero: zero is a meaningful value here - it means "AVS
+	 * off" - and skipping it leaves whatever the bootloader armed in place.
+	 */
+	if (drv->reg_data->reg_offset[SPM_REG_AVS_CTL])
 		spm_register_write(drv, SPM_REG_AVS_CTL, drv->reg_data->avs_ctl);
-	if (drv->reg_data->avs_limit)
+	if (drv->reg_data->reg_offset[SPM_REG_AVS_LIMIT])
 		spm_register_write(drv, SPM_REG_AVS_LIMIT, drv->reg_data->avs_limit);
 	spm_register_write(drv, SPM_REG_CFG, drv->reg_data->spm_cfg);
 	spm_register_write(drv, SPM_REG_DLY, drv->reg_data->spm_dly);

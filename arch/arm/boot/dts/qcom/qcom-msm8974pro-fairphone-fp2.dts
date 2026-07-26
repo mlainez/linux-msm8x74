@@ -556,14 +556,4 @@
 	qcom,init-seq = /bits/ 8 <0x1 0x64>;
 };
 
-/*
- * Krait gang-rail safety margin. These boards have a decade of silicon
- * aging behind them; the fused PVS table (speed3-pvs5-v1 on the reference
- * unit) leaves no headroom for that, and the SoC then resets with no
- * kernel output at all. 100 mV on every setpoint was needed: 50 mV kept
- * an idle board alive for hours but still died within minutes under load.
- */
-&saw_l2 {
-	qcom,vdd-margin-microvolt = <100000>;
-};
 
