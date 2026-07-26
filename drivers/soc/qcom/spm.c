@@ -92,6 +92,11 @@ struct spm_driver_data {
 	unsigned int volt_sel;
 	unsigned int margin_sel;
 	int reg_cpu;
+	/*
+	 * set_vdd() cannot return a value (it is an smp_call_func_t), so it
+	 * records the outcome here for spm_set_voltage_sel() to propagate.
+	 */
+	int set_vdd_ret;
 };
 
 static const u16 spm_reg_offset_v4_1[SPM_REG_NR] = {
@@ -365,14 +370,25 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 			 drv->reg_data->range->max_sel);
 
 	drv->volt_sel = selector;
+	drv->set_vdd_ret = 0;
 
-	if (drv->reg_cpu >= 0)
-		return smp_call_function_single(drv->reg_cpu,
-						drv->reg_data->set_vdd,
-						drv, true);
+	if (drv->reg_cpu >= 0) {
+		int ret = smp_call_function_single(drv->reg_cpu,
+						  drv->reg_data->set_vdd,
+						  drv, true);
+		return ret ? : drv->set_vdd_ret;
+	}
 
 	drv->reg_data->set_vdd(drv);
-	return 0;
+
+	/*
+	 * Propagate a failed rail write.  Without this the OPP core sees
+	 * success and goes on to raise the clock, so a rail that never reached
+	 * the requested level is followed by a frequency the silicon has not
+	 * been given the voltage for.  The vendor driver returns -EIO here and
+	 * aborts the transition for the same reason.
+	 */
+	return drv->set_vdd_ret;
 }
 
 static int spm_get_voltage_sel(struct regulator_dev *rdev)
@@ -496,9 +512,14 @@ static void smp_set_vdd_v2_1_l2(void *data)
 				     pmic_sts,
 				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
 				     1, 200, false,
-				     drv, SPM_REG_PMIC_STS))
+				     drv, SPM_REG_PMIC_STS)) {
 		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
 				    pmic_sts & 0xff, vlevel);
+		drv->set_vdd_ret = -ETIMEDOUT;
+		return;
+	}
+
+	drv->set_vdd_ret = 0;
 
 	if (avs_enabled) {
 		unsigned int max_avs = volt_sel;
