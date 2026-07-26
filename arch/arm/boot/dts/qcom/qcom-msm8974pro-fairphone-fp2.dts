@@ -250,7 +250,16 @@
 		record-size	= <0x00008000>;
 		console-size	= <0x00080000>;
 		pmsg-size	= <0x00020000>;
-		ecc-size	= <0x00000010>;
+		/*
+		 * No ECC. With ecc-size set, every boot came back with
+		 * "ramoops: error in header, 5" and no records: the ECC block
+		 * is computed over a header that this platform does not
+		 * preserve byte-perfectly across a reset, so a partially
+		 * surviving region is rejected outright instead of being read.
+		 * lk2nd's own ramoops implementation sets ecc_size = 0 for the
+		 * same region on the same SoC; follow it.
+		 */
+		ecc-size	= <0>;
 		max-reason	= <3>;		/* KMSG_DUMP_EMERG */
 	};
 };
