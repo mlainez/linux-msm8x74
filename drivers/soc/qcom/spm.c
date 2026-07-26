@@ -90,7 +90,6 @@ struct spm_driver_data {
 	const struct spm_reg_data *reg_data;
 	struct device *dev;
 	unsigned int volt_sel;
-	unsigned int margin_sel;
 	int reg_cpu;
 	/*
 	 * set_vdd() cannot return a value (it is an smp_call_func_t), so it
@@ -371,10 +370,6 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
 
-	/* Board-level safety margin on top of the fused PVS table */
-	selector = min_t(unsigned int, selector + drv->margin_sel,
-			 drv->reg_data->range->max_sel);
-
 	drv->volt_sel = selector;
 	drv->set_vdd_ret = 0;
 
@@ -573,7 +568,6 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	};
 	struct regulator_desc *rdesc;
 	struct regulator_dev *rdev;
-	u32 margin_uV;
 	int ret;
 	bool found;
 
@@ -604,22 +598,6 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		dev_dbg(dev, "SAW2 L2 regulator (shared rail)\n");
 	}
 
-	/*
-	 * Optional board-level voltage margin added to every setpoint.
-	 * Aged silicon needs headroom above the fused PVS voltage table:
-	 * boards that have been in the field for years (Fairphone 2) brown
-	 * out at the nominal table values on the higher OPPs.
-	 */
-	if (!of_property_read_u32(dev->of_node, "qcom,vdd-margin-microvolt",
-				  &margin_uV)) {
-		drv->margin_sel = DIV_ROUND_UP(margin_uV,
-					       drv->reg_data->range->step);
-		dev_info(dev, "applying %u uV (%u step) rail margin\n",
-			 margin_uV, drv->margin_sel);
-	}
-
-	drv->volt_sel = DIV_ROUND_UP(drv->reg_data->init_uV - rdesc->min_uV,
-				     rdesc->uV_step);
 	ret = linear_range_get_selector_high(drv->reg_data->range,
 					     drv->reg_data->init_uV,
 					     &drv->volt_sel,
