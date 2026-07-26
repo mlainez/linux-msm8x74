@@ -907,6 +907,34 @@ int qcom_scm_restore_sec_cfg(u32 device_id, u32 spare)
 }
 EXPORT_SYMBOL_GPL(qcom_scm_restore_sec_cfg);
 
+/*
+ * XPU (memory-protection) violation "err-fatal" behaviour, mirroring the
+ * vendor scm_xpu_err_fatal() call (SCM_SVC_MP / XPU_ERR_FATAL). The legacy
+ * command buffer is {config, spare=0} and the single u32 response reports
+ * success for enable/disable and the current state for read.
+ */
+#define QCOM_SCM_XPU_ERR_FATAL_ENABLE	0x0
+#define QCOM_SCM_XPU_ERR_FATAL_DISABLE	0x1
+#define QCOM_SCM_XPU_ERR_FATAL_READ	0x2
+
+static int qcom_scm_xpu_err_fatal(u32 config)
+{
+	struct qcom_scm_desc desc = {
+		.svc = QCOM_SCM_SVC_MP,
+		.cmd = QCOM_SCM_MP_XPU_ERR_FATAL,
+		.arginfo = QCOM_SCM_ARGS(2),
+		.args[0] = config,
+		.args[1] = 0,		/* spare, must be zero */
+		.owner = ARM_SMCCC_OWNER_SIP,
+	};
+	struct qcom_scm_res res;
+	int ret;
+
+	ret = qcom_scm_call(__scm->dev, &desc, &res);
+
+	return ret ? : res.result[0];
+}
+
 #define QCOM_SCM_CP_APERTURE_CONTEXT_MASK	GENMASK(7, 0)
 
 bool qcom_scm_set_gpu_smmu_aperture_is_available(void)
@@ -2329,6 +2357,17 @@ static const struct kernel_param_ops download_mode_param_ops = {
 module_param_cb(download_mode, &download_mode_param_ops, NULL, 0644);
 MODULE_PARM_DESC(download_mode, "download mode: off/0/N for no dump mode, full/on/1/Y for full dump mode, mini for minidump mode and full,mini for both full and minidump mode together are acceptable values");
 
+/*
+ * qcom_scm.xpu_errfatal: control TZ XPU-violation err-fatal behaviour on
+ * legacy (MSM8974-class) firmware. Unset (default) leaves firmware state
+ * untouched so a normal boot is unchanged; 0 = enable (violations reset the
+ * SoC), 1 = disable, 2 = read the current state. The result is logged.
+ */
+static int xpu_errfatal = -1;
+module_param_named(xpu_errfatal, xpu_errfatal, int, 0644);
+MODULE_PARM_DESC(xpu_errfatal,
+	"XPU err-fatal: unset=leave as-is, 0=enable, 1=disable, 2=read");
+
 static int qcom_scm_probe(struct platform_device *pdev)
 {
 	struct qcom_tzmem_pool_config pool_config;
@@ -2486,6 +2525,45 @@ static int __init qcom_scm_init(void)
 	return platform_driver_register(&qcom_scm_driver);
 }
 subsys_initcall(qcom_scm_init);
+
+static int __init qcom_scm_xpu_errfatal_init(void)
+{
+	int config, ret;
+
+	if (!qcom_scm_is_available())
+		return 0;
+
+	/*
+	 * On MSM8974-class TrustZone the vendor arms XPU-violation err-fatal at
+	 * early boot (Android scm-xpu.c). Mainline never does, which leaves the
+	 * TZ XPU error handling in the SBL default state; on this SoC that state
+	 * silently PS_HOLD-resets the whole chip under multi-core load. Issuing
+	 * the same enable call - opted in per-board via "qcom,xpu-err-fatal" -
+	 * makes the platform behave like the vendor and stops the resets.
+	 *
+	 * The qcom_scm.xpu_errfatal cmdline param overrides the DT for
+	 * diagnostics (0 enable / 1 disable / 2 read the current state).
+	 */
+	if (xpu_errfatal >= 0) {
+		if (xpu_errfatal > QCOM_SCM_XPU_ERR_FATAL_READ) {
+			pr_warn("qcom_scm: ignoring invalid xpu_errfatal=%d\n",
+				xpu_errfatal);
+			return 0;
+		}
+		config = xpu_errfatal;
+	} else if (__scm && of_property_read_bool(__scm->dev->of_node,
+						 "qcom,xpu-err-fatal")) {
+		config = QCOM_SCM_XPU_ERR_FATAL_ENABLE;
+	} else {
+		return 0;
+	}
+
+	ret = qcom_scm_xpu_err_fatal(config);
+	pr_info("qcom_scm: xpu_err_fatal(config=%d) -> %d\n", config, ret);
+
+	return 0;
+}
+late_initcall_sync(qcom_scm_xpu_errfatal_init);
 
 MODULE_DESCRIPTION("Qualcomm Technologies, Inc. SCM driver");
 MODULE_LICENSE("GPL v2");
