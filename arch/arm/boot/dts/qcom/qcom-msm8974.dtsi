@@ -1710,6 +1710,14 @@
 			compatible = "qcom,scm-msm8974", "qcom,scm";
 			clocks = <&gcc GCC_CE1_CLK>, <&gcc GCC_CE1_AXI_CLK>, <&gcc GCC_CE1_AHB_CLK>;
 			clock-names = "core", "bus", "iface";
+
+			/*
+			 * Arm TrustZone XPU-violation err-fatal at boot, as the
+			 * vendor kernel does. Without it the SBL-default XPU
+			 * error handling silently PS_HOLD-resets the SoC under
+			 * multi-core CPU load.
+			 */
+			qcom,xpu-err-fatal;
 		};
 	};
 
