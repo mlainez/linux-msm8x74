@@ -519,21 +519,18 @@ static void smp_set_vdd_v2_1_l2(void *data)
 		return;
 	}
 
+	/*
+	 * AVS is left disabled deliberately.  It is off by design on this SoC:
+	 * the vendor programs AVS_CTL/AVS_LIMIT to zero on every SAW at init
+	 * and never arms it.  The window this code used to rebuild cannot even
+	 * be expressed in the registers it writes - MIN_VLVL and MAX_VLVL are
+	 * 6 bits wide, inherited from v1.1 whose selectors fit, while a v2.1
+	 * selector reaches 255, so a window built from one is silently
+	 * truncated: selector 180 (900 mV) becomes 48 (240 mV), authorising the
+	 * hardware to track the shared Krait rail down to an arbitrary level
+	 * with no software involvement.
+	 */
 	drv->set_vdd_ret = 0;
-
-	if (avs_enabled) {
-		unsigned int max_avs = volt_sel;
-		unsigned int min_avs = max(max_avs, 4U) - 4;
-
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MIN_VLVL, min_avs);
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MAX_VLVL, max_avs);
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-
-	if (avs_enabled) {
-		avs_ctl |= SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
 }
 
 static int spm_get_cpu(struct device *dev)
@@ -714,9 +711,14 @@ static int spm_dev_probe(struct platform_device *pdev)
 	 * CPU was held in reset, the reset signal could trigger the SPM state
 	 * machine, before the sequences are completely written.
 	 */
-	if (drv->reg_data->avs_ctl)
+	/*
+	 * Write these whenever the SoC maps them, rather than only when the
+	 * value is nonzero: zero is a meaningful value here - it means "AVS
+	 * off" - and skipping it leaves whatever the bootloader armed in place.
+	 */
+	if (drv->reg_data->reg_offset[SPM_REG_AVS_CTL])
 		spm_register_write(drv, SPM_REG_AVS_CTL, drv->reg_data->avs_ctl);
-	if (drv->reg_data->avs_limit)
+	if (drv->reg_data->reg_offset[SPM_REG_AVS_LIMIT])
 		spm_register_write(drv, SPM_REG_AVS_LIMIT, drv->reg_data->avs_limit);
 	spm_register_write(drv, SPM_REG_CFG, drv->reg_data->spm_cfg);
 	spm_register_write(drv, SPM_REG_DLY, drv->reg_data->spm_dly);
