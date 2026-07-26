@@ -76,16 +76,34 @@ static void __clk_hfpll_enable(struct clk_hw *hw)
 	regmap_update_bits(regmap, hd->mode_reg, PLL_RESET_N, PLL_RESET_N);
 
 	/* Wait for PLL to lock. */
-	if (hd->status_reg)
+	if (hd->status_reg) {
 		/*
-		 * Busy wait. Should never timeout, we add a timeout to
-		 * prevent any sort of stall.
+		 * Busy wait until the lock bit is set, with interrupts
+		 * disabled: every caller holds h->lock. A HFPLL locks in
+		 * about 60 us - the delay the status-less path below trusts
+		 * blindly - so 200 us leaves ample margin.
 		 */
-		regmap_read_poll_timeout(regmap, hd->status_reg, val,
-					 !(val & BIT(hd->lock_bit)), 0,
-					 100 * USEC_PER_MSEC);
-	else
+		if (regmap_read_poll_timeout_atomic(regmap, hd->status_reg, val,
+						    val & BIT(hd->lock_bit),
+						    1, 200)) {
+			u32 l_val = 0;
+
+			regmap_read(regmap, hd->l_reg, &l_val);
+			/*
+			 * The output is enabled below regardless, which clocks
+			 * the consumer from an unlocked PLL. Failing the call
+			 * instead is not yet safe: the clk core would abort the
+			 * rate change and krait_notifier_cb() would restore the
+			 * mux onto this PLL, which would then be left in reset.
+			 * Make it visible at least, so a relock failure is
+			 * distinguishable from every other silent misbehaviour.
+			 */
+			WARN_ONCE(1, "%s failed to lock in 200 us (L_VAL %u)\n",
+				  clk_hw_get_name(hw), l_val);
+		}
+	} else {
 		udelay(60);
+	}
 
 	/* Enable PLL output. */
 	regmap_update_bits(regmap, hd->mode_reg, PLL_OUTCTRL, PLL_OUTCTRL);
