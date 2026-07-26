@@ -219,6 +219,43 @@
 	status = "okay";
 };
 
+/*
+ * Persistent RAM for post-mortem logging.
+ *
+ * This SoC resets with no kernel output at all when its power or clock state is
+ * wrong, so the failures that matter here leave nothing behind. Reserved memory
+ * is contiguous from 0x08000000 to 0x0fefffff (mpss, mba, wcnss, adsp, venus,
+ * smem, tz, rfsa, rmtfs), which leaves exactly one hole below the 256 MiB
+ * boundary: 0x0ff00000, 1 MiB. A PON warm reset does not cycle the DDR rail, so
+ * the contents survive it - the property vendor RAM-dump tooling relies on.
+ *
+ * no-map is required on ARM32: it keeps the range out of the linear map, so
+ * pstore takes the ioremap_wc + memcpy_toio path and records are never sitting
+ * in a dirty D-cache line when the SoC is dropped. Without it the region is a
+ * write-combine alias of cacheable memory, which is not architecturally
+ * predictable here. Several in-tree examples omit no-map; do not copy them.
+ *
+ * Sizes must be powers of two - ramoops_probe() silently rounds each one down.
+ * The console zone is the valuable one: it records continuously, whereas the
+ * dmesg zone only fills from a panic handler, and an externally triggered reset
+ * never runs one. An empty dmesg zone next to a populated console zone is
+ * itself a result: it means nothing on this CPU asked for the reset.
+ */
+&reserved_memory {
+	ramoops@ff00000 {
+		compatible = "ramoops";
+		reg = <0x0ff00000 0x00100000>;
+		no-map;
+
+		record-size	= <0x00008000>;
+		console-size	= <0x00080000>;
+		pmsg-size	= <0x00020000>;
+		ecc-size	= <0x00000010>;
+		max-reason	= <3>;		/* KMSG_DUMP_EMERG */
+	};
+};
+
+
 &imem {
 	reboot-mode {
 		mode-normal = <0x77665501>;
