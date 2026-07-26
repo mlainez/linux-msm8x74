@@ -57,7 +57,12 @@ static int krait_notifier_cb(struct notifier_block *nb,
 	 * clk framework itself would have changed the parent for the new rate.
 	 * Only otherwise, put back to the old parent.
 	 */
-	} else if (event == POST_RATE_CHANGE) {
+	/*
+	 * ABORT_RATE_CHANGE has to be handled the same way: the core sends it
+	 * when any notifier fails PRE, and without restoring the parent here
+	 * the CPU (or the L2) is left on the safe parent permanently.
+	 */
+	} else if (event == POST_RATE_CHANGE || event == ABORT_RATE_CHANGE) {
 		if (!mux->reparent)
 			ret = krait_mux_clk_ops.set_parent(&mux->hw,
 							   mux->old_index);
