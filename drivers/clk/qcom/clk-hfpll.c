@@ -213,6 +213,7 @@ static int clk_hfpll_init(struct clk_hw *hw)
 	u32 mode, status;
 
 	regmap_read(regmap, hd->mode_reg, &mode);
+	mode &= PLL_BYPASSNL | PLL_RESET_N | PLL_OUTCTRL;
 	if (mode != (PLL_BYPASSNL | PLL_RESET_N | PLL_OUTCTRL)) {
 		__clk_hfpll_init_once(hw);
 		return 0;
