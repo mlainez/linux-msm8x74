@@ -234,13 +234,19 @@ static struct linear_range spm_v1_1_regulator_range =
 static struct linear_range spm_v2_1_regulator_range =
 	REGULATOR_LINEAR_RANGE(350000, 70, 255, 5000);
 
-/* SPM register data for 8974, 8084 per-CPU (no voltage control - L2 master handles it) */
+/*
+ * SPM register data for 8974, 8084 per-CPU.
+ *
+ * These SAWs run idle/sleep sequences only: on MSM8974 the L2/APCS SAW is the
+ * one wired to the PMIC over SPMI, and the vendor accordingly gives its per-CPU
+ * nodes no pmic-data at all.  Use the plain v2.1 offset table so PMIC_DATA_0/1
+ * are not even mapped here - the extended table plus a PMIC payload would let a
+ * per-CPU sequencer drive the shared Krait rail behind the regulator's back.
+ */
 static const struct spm_reg_data spm_reg_8974_8084_cpu  = {
-	.reg_offset = spm_reg_offset_v2_1_cpu,
+	.reg_offset = spm_reg_offset_v2_1,
 	.spm_cfg = 0x1,
 	.spm_dly = 0x3C102800,
-	.pmic_data[0] = 0x02030080,
-	.pmic_data[1] = 0x00030000,
 	.seq = { 0x03, 0x0B, 0x0F, 0x00, 0x20, 0x80, 0x10, 0xE8, 0x5B, 0x03,
 		0x3B, 0xE8, 0x5B, 0x82, 0x10, 0x0B, 0x30, 0x06, 0x26, 0x30,
 		0x0F },
