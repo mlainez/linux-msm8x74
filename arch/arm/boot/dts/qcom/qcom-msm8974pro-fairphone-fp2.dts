@@ -219,6 +219,31 @@
 	status = "okay";
 };
 
+/*
+ * MEASUREMENT, NOT A FIX - this belongs to a throwaway test branch.
+ *
+ * Nothing in this kernel ever scales the L2: krait-cc restores whatever rate
+ * the bootloader left (729.6 MHz on this board) and no DT node consumes
+ * <&kraitcc 4>, so the L2 stays there while the CPUs range up to 2.26 GHz.
+ * Android's L2 follows the fastest online core across eleven rates, and for a
+ * core at 1036.8 MHz - the operating point that reset this board after five
+ * minutes under four-core load - it runs the L2 at 1036.8 MHz too.
+ *
+ * Pin the L2 there to get a direct A/B against that recorded measurement.
+ * 1036.8 MHz is the highest rate whose qcom,l2-fmax row is still NORMAL, so it
+ * stays inside the CX corner floor this tree now votes; do not raise it further
+ * without also raising the corner.
+ *
+ * The real fix is to couple the L2 rate to the CPUs and vote the corner from
+ * it, which needs driver code - see KERNEL-AUDIT.md in the buildroot diag
+ * package.
+ */
+&kraitcc {
+	assigned-clocks = <&kraitcc 4>;
+	assigned-clock-rates = <1036800000>;
+};
+
+
 &imem {
 	reboot-mode {
 		mode-normal = <0x77665501>;
