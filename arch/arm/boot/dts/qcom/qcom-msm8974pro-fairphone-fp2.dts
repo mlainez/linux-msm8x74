@@ -142,22 +142,23 @@
 };
 
 /*
- * Raise the CPU frequency floor to 729.6 MHz. The stock Android BSP never
- * throttled below 960 MHz; letting the thermal governor (or the cpufreq
- * governor at idle) collapse to 300 MHz makes the device unusably slow for
- * no meaningful thermal or power win on this board. Disabling the OPPs
- * below the floor raises both the idle minimum and the deepest thermal
- * throttle step in one place, for every consumer of this DTB.
+ * Expose exactly the operating points the stock Android BSP exposes.
+ *
+ * The vendor's qcom,cpufreq-table for this SoC offers 14 rates - 300, 422.4,
+ * 652.8, 729.6, 883.2, 960, 1036.8, 1190.4, 1267.2, 1497.6, 1574.4, 1728,
+ * 1958.4 and 2265.6 MHz - and init.qcom.power.rc sets scaling_min_freq to
+ * 300000 on all four cores at every boot. 960 MHz is a thermal *ceiling*
+ * applied to CPU0 at 110 C, not a floor.
+ *
+ * An earlier version of this file disabled everything below 729.6 MHz on the
+ * claim that the BSP never throttled below 960 MHz. That is not what the BSP
+ * does. Rather than invent a floor, disable the rates Android does not use and
+ * keep the ones it does, so this board runs the operating points the silicon
+ * has actually shipped with. The three rates above 2265.6 MHz need speed bin 3
+ * and are already excluded by opp-supported-hw.
  */
-&{/opp-table-cpu/opp-300000000} {
-	status = "disabled";
-};
 
 &{/opp-table-cpu/opp-345600000} {
-	status = "disabled";
-};
-
-&{/opp-table-cpu/opp-422400000} {
 	status = "disabled";
 };
 
@@ -169,7 +170,47 @@
 	status = "disabled";
 };
 
-&{/opp-table-cpu/opp-652800000} {
+&{/opp-table-cpu/opp-806400000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-1113600000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-1344000000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-1420800000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-1651200000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-1804800000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-1881600000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-2035200000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-2112000000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-2150400000} {
+	status = "disabled";
+};
+
+&{/opp-table-cpu/opp-2188800000} {
 	status = "disabled";
 };
 
