@@ -50,7 +50,7 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
-			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
@@ -68,7 +68,7 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
-			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
@@ -86,7 +86,7 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
-			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
@@ -104,7 +104,7 @@
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
 			cpu-supply = <&saw_l2_vreg>;
-			power-domains = <&rpmpd MSM8974_VDDCX>;
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			#cooling-cells = <2>;
 			cpu-idle-states = <&cpu_spc>;
