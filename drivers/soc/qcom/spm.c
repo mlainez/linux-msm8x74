@@ -83,6 +83,12 @@ struct spm_reg_data {
 	struct linear_range *range;
 	unsigned int ramp_delay;
 	unsigned int init_uV;
+
+	/*
+	 * The SAW is used only as a voltage regulator (its low-power
+	 * sequencer must not be armed). See the probe for why.
+	 */
+	bool regulator_only;
 };
 
 struct spm_driver_data {
@@ -274,6 +280,7 @@ static const struct spm_reg_data spm_reg_8974_8084_l2  = {
 	.range = &spm_v2_1_regulator_range,
 	.init_uV = 1100000,
 	.ramp_delay = 1250,
+	.regulator_only = true,
 };
 
 /* SPM register data for 8226 */
@@ -478,6 +485,7 @@ static void smp_set_vdd_v2_1_l2(void *data)
 	struct spm_driver_data *drv = data;
 	unsigned int vctl, avs_ctl, pmic_sts;
 	unsigned int vlevel, volt_sel;
+	unsigned long flags;
 	bool avs_enabled;
 
 	volt_sel = drv->volt_sel;
@@ -490,6 +498,17 @@ static void smp_set_vdd_v2_1_l2(void *data)
 		avs_ctl &= ~SPM_2_1_AVS_CTL_AVS_ENABLED;
 		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
 	}
+
+	/*
+	 * Kicking the SAW state machine (RST) and writing VCTL must not be
+	 * interrupted: this SAW drives the *shared* Krait rail, and if a CPU
+	 * power-collapses part-way through, its SPM sequencer can drive the
+	 * same rail and race the write, leaving the PMIC arbiter's state
+	 * machine wedged (the VCTL write never lands) and the SoC silently
+	 * PS_HOLD-resets during idle DVFS. The vendor pins this block for the
+	 * same reason. Hold IRQs off across RST -> VCTL -> latch poll.
+	 */
+	local_irq_save(flags);
 
 	spm_register_write(drv, SPM_REG_RST, 1);
 
@@ -514,11 +533,14 @@ static void smp_set_vdd_v2_1_l2(void *data)
 				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
 				     1, 200, false,
 				     drv, SPM_REG_PMIC_STS)) {
+		local_irq_restore(flags);
 		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
 				    pmic_sts & 0xff, vlevel);
 		drv->set_vdd_ret = -ETIMEDOUT;
 		return;
 	}
+
+	local_irq_restore(flags);
 
 	/*
 	 * AVS is left disabled deliberately.  It is off by design on this SoC:
@@ -713,8 +735,29 @@ static int spm_dev_probe(struct platform_device *pdev)
 				drv->reg_data->pmic_data[1]);
 
 	/* Set up Standby as the default low power mode */
-	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL])
-		spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL]) {
+		if (drv->reg_data->regulator_only) {
+			/*
+			 * The msm8974 L2/APCS SAW is used only as the shared
+			 * Krait voltage regulator: this driver drives its VCTL
+			 * setpoint directly from set_vdd() on every OPP change.
+			 * Its low-power sequencer must NOT be armed - an armed
+			 * sequencer together with those direct VCTL writes
+			 * silently de-asserts PS_HOLD and resets the whole SoC
+			 * during idle DVFS (a pinned frequency, which makes no
+			 * VCTL writes, survives for hours; free DVFS dies in
+			 * minutes). Clear the enable explicitly since the
+			 * bootloader leaves it set. Sibling SoCs (8226/8610)
+			 * ship this SAW with the sequencer disabled too.
+			 */
+			u32 ctl = spm_register_read(drv, SPM_REG_SPM_CTL);
+
+			ctl &= ~SPM_CTL_EN;
+			spm_register_write_sync(drv, SPM_REG_SPM_CTL, ctl);
+		} else {
+			spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+		}
+	}
 
 	if (IS_ENABLED(CONFIG_REGULATOR))
 		return spm_register_regulator(&pdev->dev, drv);
