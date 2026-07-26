@@ -218,7 +218,6 @@ static const u16 spm_reg_offset_v2_1_cpu[SPM_REG_NR] = {
 };
 
 static void smp_set_vdd_v1_1(void *data);
-static void smp_set_vdd_v2_1(void *data);
 
 static struct linear_range spm_v1_1_regulator_range =
 	REGULATOR_LINEAR_RANGE(700000, 0, 56, 12500);
@@ -449,56 +448,6 @@ enable_avs:
 	}
 }
 
-static void smp_set_vdd_v2_1(void *data)
-{
-	struct spm_driver_data *drv = data;
-	unsigned int vctl, avs_ctl, pmic_sts;
-	unsigned int vlevel, volt_sel;
-	bool avs_enabled;
-
-	volt_sel = drv->volt_sel;
-	vlevel = volt_sel;
-
-	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
-	avs_enabled = avs_ctl & SPM_2_1_AVS_CTL_AVS_ENABLED;
-
-	if (avs_enabled) {
-		avs_ctl &= ~SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-
-	spm_register_write(drv, SPM_REG_RST, 1);
-
-	vctl = spm_register_read(drv, SPM_REG_VCTL);
-	vctl &= ~(SPM_2_1_VCTL_VLVL | SPM_2_1_VCTL_PORT);
-	vctl |= vlevel;
-	spm_register_write(drv, SPM_REG_VCTL, vctl);
-
-	if (read_poll_timeout_atomic(spm_register_read,
-				     pmic_sts,
-				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
-				     1, 200, false,
-				     drv, SPM_REG_PMIC_STS)) {
-		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
-				    pmic_sts & 0xff, vlevel);
-		goto enable_avs_v2_1;
-	}
-
-	if (avs_enabled) {
-		unsigned int max_avs = volt_sel;
-		unsigned int min_avs = max(max_avs, 4U) - 4;
-
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MIN_VLVL, min_avs);
-		avs_ctl = FIELD_SET(avs_ctl, SPM_AVS_CTL_MAX_VLVL, max_avs);
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-
-enable_avs_v2_1:
-	if (avs_enabled) {
-		avs_ctl |= SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
-}
 
 /*
  * smp_set_vdd_v2_1_l2 - Set voltage via L2/APCS SAW2 (MSM8974 gang supply).
