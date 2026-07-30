@@ -168,24 +168,91 @@ branch or drop, before CP3.
   light load; telemetry complete to the last sample; zero unexplained boots
   (per-boot journal tails + PON reasons + ramoops, not wall-clock timestamps).
   Soak arithmetic: 21 h excludes MTBF ≥ ~7 h at 95 % (blueprint §7).
-- **Result:** *(next session: read soak log + PON + pstore before ANY reflash)*
+- **Result (2026-07-30 ~20:35Z): FAIL — reset after ~47.5 min idle.**
+  Evidence (in `~/Projects/msm8974-scratch/artifacts/fp2-dut/20260730-cp1-reset1/`):
+  - PON on the next boot: **previous power-off PS_HOLD (MSM-controlled)**,
+    `warm_reset=0x0002`, power-on "hard reset"/USB-charger — on battery, so NOT
+    UVLO, NOT external power.
+  - **console-ramoops-0 captured the dying boot** (24.8 KB — the harness's first
+    read silent reset): normal boot activity ends t=33 s (`l7: disabling`), then
+    silence until exactly one line, **`l24: voltage operation not allowed` at
+    t=2849.8 s**, then reset. l24 = pm8941 LDO24 (3.075 V, `regulator-boot-on`,
+    supplied from `vreg_boost`). Someone attempted a voltage set on l24 at that
+    moment and was denied by constraints; the reset followed. Same denial message
+    appears benignly at t≈2.9 s during boot on other runs — the actor, not the
+    message, is the lead (suspects: qcom-smbb charger/USB event path, given the
+    USB-charger PON context).
+  - **Instrument defect found:** the dying boot's soak telemetry was LOST —
+    buildroot mounts `/var/log` on tmpfs, so soak-logger's fsync went to RAM.
+    Fixed: LOG_DIR → `/root/soak` (rootfs).
+  - **Verdict: FAIL-UNKNOWN** (mechanism not established; one evidence thread).
+    Consequence: the *fork* 6.18 tree resets at idle **without the DVFS stack**
+    — DVFS drivers are not the sole cause. Prior CP1 framing is superseded.
+  - **Routing (operator decision, Marc):** deepest isolation next — a **vanilla
+    ground truth** with zero fork patches (below).
+
+### SES1-H — CP1-v: vanilla 6.18.39 ground truth (pre-registered)
+- **Hypothesis:** pure stable v6.18.39 — the fork's base commit, zero fork
+  topics — in the postmarketOS shape (no CPU DVFS) is idle-stable on this DUT.
+  Falsified by: a PS_HOLD idle reset on this image.
+- **Baseline selection:** first-parent history of `6.18/staging` shows the FIRST
+  topic ever merged was `6e6b3f338e45` (dvfs-spm), directly on
+  **`f89c296854b755a66657065c35b05406fc18264d` ("Linux 6.18.39")** — so "the
+  commit right before any DVFS topic" is the pure stable base itself. No
+  pre-DVFS state containing adsp-sensors exists (they merged later); per
+  operator instruction they are left out rather than fabricating a tree.
+- **Single variable vs BV-A:** the fork patch set (removed). **Known second
+  delta, unavoidable:** DTB is the in-tree *display* variant (headless DTS is a
+  fork addition) — display/MDSS active is an environmental difference to keep
+  in mind when comparing; if vanilla proves stable, re-adding fork topics under
+  the same display DTB isolates cleanly.
+- **Manifest:** `fairphone2_vanilla618_defconfig` (nodvfs fragment kept; overlay
+  override boots `qcom-msm8974pro-fairphone-fp2.dtb`; `lk2nd.pass-ramoops`
+  INJECTS the ramoops node — vanilla DT has none); kernel release 6.18.39;
+  soak-logger now writes to `/root/soak`.
+- **Criteria (pre-registered):** same as CP1 — ≥21 h continuous clean idle,
+  telemetry complete, zero unexplained boots. Any PS_HOLD reset = FAIL and,
+  because the tree is pure stable, implicates base/config/environment rather
+  than fork patches.
+- **Result: soak STARTED 2026-07-30 ~22:00 UTC** after full validation: kernel
+  6.18.39 = modules dir, zero cpufreq policies, lk2nd successfully **injected**
+  the ramoops node (`ramoops@30f80000` — vanilla DT has none), console→ramoops
+  live, all 3 remoteprocs running on pure stable, soak-logger sampling to
+  `/root/soak` (rootfs), idle temps 37–53 °C. *(soak outcome pending)*
+- **Instrument caveats on vanilla:** the PON-reason dmesg prints are a FORK
+  patch (`6.18/topic/pon-reason`) — vanilla logs no power-off reason at boot.
+  Evidence chain for this soak = ramoops console + fsync'd telemetry; PON
+  registers remain readable post-hoc via spmi regmap debugfs if a reset occurs.
+- **Access notes:** the day's SSH key-auth failures (incl. the BV-A
+  "authorized_keys lost" scare in SES1-G) were all workstation-side: the
+  operator ssh-agent died and the personal key is passphrase-locked. Campaign
+  key (passphrase-less): `~/Projects/msm8974-scratch/preserved/dut_ed25519`,
+  installed for root@10.0.42.1. Operator reports `reboot-mode bootloader`
+  DID enter fastboot when run from his console (contradicts SES1-F's failed
+  poll — retest properly before trusting either way).
 
 ---
 
-## Current state (end of session 2026-07-30)
+## Current state (end of session, updated 2026-07-31 early)
 
-- **Checkpoint:** CP0 largely proven on the new DUT (PON classification of an
-  induced software reboot ✔, ramoops console across warm reboot ✔, fsync'd
-  telemetry from boot ✔, manifested SHA-pinned builds ✔). CP0 residue: induced
-  *silent*-reset classification (e.g. watchdog) not yet demonstrated; reboot-mode
-  fastboot path broken (see SES1-F); collector + verify/flash wrappers not yet
-  scripted; X1 fuse read on THIS die pending.
-- **Anchor:** **BV-A image** (`MANIFEST-BVA-20260730.env`,
-  `output-fp2/images/sdcard.img`, preserved copies in `~/Projects/msm8974-scratch/preserved/`).
-  Restore: put DUT in fastboot (key combo) →
-  `fastboot flash userdata ~/Projects/msm8974-scratch/preserved/sdcard-1a41629d4758-dvfs-BVB-20260730.img` (BV-B)
-  or rebuild-free BV-A from `output-fp2/images/sdcard.img`.
-- **DUT:** real FP2 + battery, `e4f4c070`, lk2nd, no UART. Carrier board retired.
-- **Single next action:** let the CP1 soak run ≥ 21 h untouched; next session begins
-  by reading `/var/log/soak/`, PON reasons and (manually mounted) pstore BEFORE
-  anything else touches the device.
+- **Checkpoint:** CP1 (fork tree, no DVFS) = **FAIL-UNKNOWN** after one ~47.5 min
+  idle PS_HOLD reset (SES1-G) — the fork tree resets at idle without the DVFS
+  drivers. **CP1-v (vanilla v6.18.39 ground truth) soak RUNNING since
+  2026-07-30 ~22:00 UTC** (SES1-H). CP0 residue: induced silent-reset
+  classification, reboot-mode retest (operator says it works; my poll said no),
+  collector/verify/flash wrappers, X1 fuse read on this die, PON-reason reading
+  on vanilla via regmap.
+- **Images:** CP1-v vanilla = current `output-fp2/images/sdcard.img`
+  (`MANIFEST-VANILLA618-20260730.env`). BV-A fork-no-DVFS and BV-B fork-DVFS
+  preserved in `~/Projects/msm8974-scratch/preserved/` with manifests.
+- **DUT:** real FP2 + battery, `e4f4c070`, lk2nd, no UART. SSH key:
+  `~/Projects/msm8974-scratch/preserved/dut_ed25519` → root@10.0.42.1.
+  Carrier board retired.
+- **Single next action:** leave the CP1-v soak untouched ≥ 21 h (until
+  2026-07-31 ~19:00 UTC); next session starts by reading `/root/soak/`,
+  pstore (`mount -t pstore pstore /sys/fs/pstore`) and — if a reset occurred —
+  PON registers via regmap debugfs, BEFORE anything touches the device.
+  - CP1-v clean ⇒ the fork's own topics (or the headless DTB / fork DT changes)
+    are implicated → bisect by re-adding topic groups on the vanilla base.
+  - CP1-v resets ⇒ pure stable 6.18 + this config/environment is implicated →
+    council with upstream-diff lens (6.16→6.18) before any fork work resumes.
