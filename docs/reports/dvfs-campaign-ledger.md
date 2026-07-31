@@ -49,6 +49,39 @@ reverts to the last anchor on fail. Full port manifest:
   "DVFS resets under load on 6.12" into a named, one-cause, fixed
   prerequisite bug — the whole point of not bulk-porting.
 
+### D1 — Krait clock plumbing *(pre-registered before run)*
+- **Hypothesis:** populating the Krait clock tree (per-CPU HFPLLs + L2 HFPLL +
+  krait-cc-v2 controller) is stable on its own — the controller enables/locks
+  the HFPLLs and sets up the secondary muxes at probe — even with cpufreq NOT
+  driving frequency.
+- **Single variable vs D0 anchor:** `6.12/topic/krait-clk` (7 commits: 5 clk
+  driver fixes ported from 6.18, msm8974 hfpll_data, hfpll0-3/hfpll_l2/kraitcc
+  DT nodes) + Kconfig `QCOM_HFPLL/KRAITCC/KRAIT_CLOCKS/KRAIT_L2_ACCESSORS`.
+  **No** cpu_opp_table and **no** cpu `clocks=<&kraitcc>` wiring → cpufreq does
+  not bind, CPUs stay at boot frequency. Integration `6.12/int/d1`
+  (`3e2f96125a56`); diff vs D0 = only clk/hfpll/dtsi (verified).
+- **Criteria:** PASS = boots, `clk_summary` shows the HFPLLs present and the
+  krait-cc clocks registered, **zero `hfpll* failed to lock` WARN**, no
+  regression (display/sensors/wlan/modem, 3 boots). FAIL = HFPLL-lock WARN
+  (→ the `.l_val = 0x1c` seed becomes D1's attributed fix, cleanly isolated) or
+  any reset/regression.
+- **Deliberately excluded (l_val seed):** the uncommitted 6.18
+  `.l_val = 0x1c` hfpll seed is NOT in D1's baseline — if the hfpll1 WARN fires
+  (krait-cc enabling an unconfigured secondary PLL), that seed is the fix, and
+  D1 will attribute it precisely instead of pre-applying an unproven patch.
+- **Result: PASS after the pre-registered fix** (2026-07-31, battery FP2).
+  First build surfaced exactly the predicted `hfpll1 failed to lock in 200 us
+  (L_VAL 0)` WARN at `krait_cc_probe → krait_add_clks` — FAIL-BOUNDED, mechanism
+  confirmed (krait-cc enables a secondary HFPLL before its rate is set; with no
+  `.l_val`, `init_once()` writes no L register). Applied the `.l_val = 0x1c`
+  seed (its own attributed commit, not pre-bundled). After fix, 3/3 boots:
+  **zero WARN**, all 4 CPU HFPLLs locked at 960 MHz + L2 HFPLL at 729.6 MHz,
+  no regression (display/sensors/wlan/modem/xpu). Topic `6.12/topic/krait-clk`
+  (8 commits) merged to `6.12/staging` (`9fd16c1c049b`), pushed. **Anchor D2.**
+- **Method note:** D1 predicted its own failure mode and fix in the
+  pre-registration, then confirmed both — the l_val seed is now evidence-backed
+  and committed rather than an unproven worktree experiment.
+
 ---
 
 ## State of knowledge (seed, from PLAN §2 — confirmed 2026-07-30)
