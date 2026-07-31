@@ -82,6 +82,33 @@ reverts to the last anchor on fail. Full port manifest:
   pre-registration, then confirmed both — the l_val seed is now evidence-backed
   and committed rather than an unproven worktree experiment.
 
+### D2 — isovoltage frequency sweep (CP3) *(design + pre-registration)*
+- **Anchor:** D1 = `6.12/staging 9fd16c1c049b`. Boot CPU freq measured **960 MHz**
+  (all 4 krait pri-muxes), stable → boot voltage supports ≤ 960 MHz.
+- **Design finding (authority: `drivers/cpufreq/qcom-cpufreq-nvmem.c` on 6.12):**
+  `match_data_krait` uses `.genpd_names = generic_genpd_names = {"perf", NULL}`
+  and **no cpu-supply regulator** — 6.12 models krait perf via a genpd +
+  `required-opps`, not `regulator_set_voltage`. So scaling CPU frequency does
+  NOT drive the APC/SAW2 rail directly; mainline krait on msm8974 is effectively
+  isovoltage already. The fork (6.18) instead attaches `"cx"` (rpmpd corner).
+  **This is a real wiring fork to resolve before flashing anything that sets CPU
+  frequency** (which "perf"/"cx" domain the CPU OPP votes; how the SPM gang-rail
+  in D3 later adds real APC voltage scaling to exceed the boot envelope).
+- **Hypothesis:** frequency scaling across 300–960 MHz (within the boot-voltage
+  envelope, no APC voltage change) is stable — proving the clock path
+  (krait-cc mux switching + HFPLL rate changes) independent of the voltage path.
+- **Planned single variable vs D1:** a freq-only CPU OPP table capped at
+  960 MHz (opp-hz + required-opps CX-pinned super_turbo; NO opp-microvolt) +
+  cpu `clocks=<&kraitcc N>` + `operating-points-v2` + the CX genpd attach.
+  Rail never driven → stays at boot voltage → safe.
+- **Criteria (to pre-register at run):** full 300–960 sweep stable, then a
+  transition-storm (L3) clean; zero HFPLL WARN; no regression. Also reads X1
+  (DUT speed bin/PVS via the nvmem driver once it binds).
+- **Status: design open** — pausing before implementing the CPU-frequency DT to
+  settle the perf-vs-cx genpd wiring correctly (voltage-safety); NOT rushing an
+  undervolt/overvolt config onto the device at the end of a long session.
+  Next session resumes here with the genpd/required-opps design.
+
 ---
 
 ## State of knowledge (seed, from PLAN §2 — confirmed 2026-07-30)
