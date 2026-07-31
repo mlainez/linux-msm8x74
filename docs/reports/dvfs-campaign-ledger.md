@@ -309,6 +309,60 @@ branch or drop, before CP3.
   issue with a timeout, then poll `fastboot devices`). SES1-F's FAIL was a
   false negative from the blocking pipe + poll interaction.
 
+### SES2-C — display bring-up on 6.18 (the day's main effort)
+Operator requirement: no baseline without 6.16 feature parity, i.e. the screen
+must work. Chain of root causes found and fixed, each from the vendor tree
+(authority 1) once the wall protocol was applied:
+
+| # | Root cause | Fix | Verified |
+|---|---|---|---|
+| 1 | Panel driver + DT never ported to 6.18 (out-of-tree in msm8974-mainline) | `6.18/topic/fp2-panel`: generated OTM1902B/S6D6FA1 drivers (6.16.y regeneration — the 6.15 ones use removed `mipi_dsi_*_write_seq` APIs) + DT display wiring, GPU enable deliberately excluded | panel binds, backlight DCS answers |
+| 2 | Display controller deferred forever: `qnoc` interconnects fail `-ENOENT` without the msm8974 RPM bus clocks | merged `6.18/topic/smd-rpm-clocks` into baseline | interconnects probe, MDP binds |
+| 3 | `mmss_s0_axi_clk` "stuck at off" hang | cherry-picked the MMSSNOC-parent fix with a proper message (vendor lineage `e604a98f5daf`) | boot survives display init |
+| 4 | **TE never enabled** — vendor injects DCS 0x35 from the *mdss framework* (`qcom,mdss-dsi-te-dcs-command`), so it exists in no panel blob and no generated driver | `set_tear_on(VBLANK)` in both panels' `on()` | `pp done time out` stops recurring; flushes complete at ~30 fps |
+| 5 | Panel rails unclaimed by the panel driver | `vdd`(l22)/`vddio`(l12) bulk-enable + DT supplies | rails held with consumers |
+| 6 | **LPAE page tables on an SMMU that only implements V7S** — vendor programs `TTBCR=0` + short-descriptor + PRRR/NMRR on every 8974 MMSS SMMU | `ARM_V7S` format for the secure msm8974 instance (TTBR0 32-bit, ASID in CONTEXTIDR) | CB dump reads vendor-identical: `SCTLR=000010eb TCR=0 FSR=0` |
+| 7 | Vendor BFB/prefetch block (18 impl-defined globals) never programmed | write the vendor register/value pairs after `restore_sec_cfg` | "programmed 18 BFB registers" at boot |
+| 8 | Fork's IOMMU port keyed 3 IP quirks + the TZ gate on `nonsecure`, breaking any secure instance (incl. silently skipping `restore_sec_cfg` → raw PAs on the bus) | re-keyed on the `qcom,msm8974-iommu` compatible / `sec_id` presence; `INTR_SEL_NS` write made unreachable on 8974; runtime-PM forbidden for the GDSC-backed secure instance | boots, attaches, zero faults |
+
+**Result: STILL BLACK.** Everything verifiable is nominal — panel initialized and
+backlit, DSI link at 1080p rates, TE pulsing, MDP5 committing/flushing, IOMMU
+attached with vendor-identical CB state, zero context faults, BFB programmed.
+Writing 8 MB of noise into `/dev/fb0` produces no visible change, so the panel
+is not displaying our framebuffer at all. A no-WCNSS variant (isolation build)
+boots stable with the same black screen ⇒ two independent open items:
+(a) scanout produces no pixels despite clean translation; (b) WCNSS bring-up +
+active display DMA = silent reset/bootloop (only with display enabled).
+
+**Verdict: FAIL-UNKNOWN** on display scanout. Per blueprint §6 the campaign
+stops iterating and records the state of the art.
+
+### SES2-D — why this is hard: the upstream record (authority 3/5)
+- The carveout was removed **because of us**: Rob Clark, `eab7766c79fd` —
+  *"standing in the way of drm_gpuvm / VM_BIND support … frequently broken and
+  rarely tested. And I think only needed for a 10yr old not quite upstream SoC
+  (msm8974). Maybe we can add support back in later, but I'm doubtful."*
+  The no-IOMMU hard-fail (`c94fc6d35685`) is a consequence of the drm_gpuvm
+  conversion. ⇒ a fork-carried carveout revert is a permanent fight with
+  VM_BIND churn, not a one-time port (confirmed: reverse-applying conflicts in
+  every touched file).
+- **Nobody has solved the IOMMU path.** In the removal thread Luca Weiss (FP2's
+  own mainline maintainer) states he and Matti Lehtimäki have *"a semi-working
+  branch but hitting random issues with it"* and that *"nobody who really knows
+  GPU and IOMMU bits has looked at this in recent years"*; Dmitry Baryshkov:
+  *"MSM8974 is quite upstream, but anyway, let's drop it."* No replacement was
+  proposed. msm8974-mainline's newest branch is `qcom-msm8974-6.16.y` and
+  pmaports ships 6.15.11 — **the whole family has never crossed this removal.**
+  Our result today (translation clean, scanout black, random resets) reproduces
+  their "semi-working with random issues" independently.
+- **Third path, fully supported in 6.18, no carveout and no SMMU:** simpledrm
+  on lk2nd's own framebuffer. `CONFIG_DRM_SIMPLEDRM` exists (currently `=m` in
+  our config) and lk2nd already emits a `simple-framebuffer` node with a
+  `no-map` `/reserved-memory` region behind `lk2nd.pass-simplefb`
+  (`lk2nd/display/simplefb.c`). Gives boot log + console + a framebuffer for
+  userspace with zero fork burden; does **not** give KMS (no mode set, no
+  GPU→panel compositing, no DRM panel power control) ⇒ not full 6.16 parity.
+
 ## Current state (updated 2026-07-31, release-baseline soak running)
 
 - **Checkpoint:** SES2-A release soak RUNNING on `6.18/baseline`
