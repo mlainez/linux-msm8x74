@@ -736,3 +736,31 @@ Remaining untried angles (all uncertain, each a build/flash cycle):
 - full coeff+load phase policy (spec §5.2 option B) vs voltage-only.
 
 Device parked on `powersave` (fixed 300 MHz, transition-quiet, stable).
+
+## D3v3 A/B (2026-07-31) — phase/FTS is HARMFUL; #1 spec fix refuted
+
+Made phase/FTS runtime-toggleable (module param `l2_phase_fts`, spm-gangrail
+`ae23ddf7b5df`, int/d3 `562398e5991b`) + FSM-poll-timeout warn + info_once.
+On-device facts:
+- Instrumentation: `phase/FTS active` fires (path runs) and **0 FSM-poll
+  timeouts** — the port-1/2 writes land cleanly. So §5 is NOT a silent no-op.
+- **Clean A/B, same kernel/boot, identical 300↔960 idle-storm:**
+  - fix ON  (phase/FTS): reset at **~34,800 flips (~15 s)**
+  - fix OFF (voltage-only, = D3): reset at **~99,600 flips (~36 s)**
+  ⇒ dynamic phase/FTS (policy A) makes the reset **~3× sooner** — HARMFUL, not
+  the fix. Refutes DVFS-TRANSITION-FIX-SPEC §5 (top candidate) on 6.12, at least
+  with the voltage-only coeff policy.
+
+Standing facts after D3v3:
+- Best config so far = phase/FTS OFF (default flipped to off / commit to be
+  reverted). Even so, free DVFS resets at ~99.6k flips (~36 s storm ⇒ ~hours at
+  field ~1/s) — the goal is still not met.
+- The per-transition PS_HOLD fault is confirmed real, silent, rate-scaled, and
+  resistant to: isovoltage (D2), gang-rail voltage scaling (D3), dynamic
+  phase/FTS (D3v3, harmful). The fork itself parked this after a spec + WIP.
+
+Untried / open (for a steer): spec §6 arm-SPM (fork said "made it worse"); the
+fork's own ~3× mitigation 4b2508 (disarm L2 SPM seq + irq-off across the VCTL
+write) which THIS port omits; coeff+load policy B; bisect the 6.12↔6.18 delta;
+or accept fixed-frequency (stable for hours) / no free DVFS as the shippable
+6.12 and keep the reset as tracked research.
