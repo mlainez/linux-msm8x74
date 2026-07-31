@@ -391,6 +391,15 @@
 			reg = <0xf9012000 0x1000>;
 		};
 
+		hfpll_l2: clock@f9016000 {
+			compatible = "qcom,msm8974-hfpll", "qcom,hfpll";
+			reg = <0xf9016000 0x30>;
+			clocks = <&xo_board>;
+			clock-names = "xo";
+			#clock-cells = <0>;
+			clock-output-names = "hfpll_l2";
+		};
+
 		watchdog@f9017000 {
 			compatible = "qcom,apss-wdt-msm8974", "qcom,kpss-wdt";
 			reg = <0xf9017000 0x1000>;
@@ -496,6 +505,42 @@
 		saw3: power-manager@f90b9000 {
 			compatible = "qcom,msm8974-saw2-v2.1-cpu", "qcom,saw2";
 			reg = <0xf90b9000 0x1000>, <0xf9009000 0x1000>;
+		};
+
+		hfpll0: clock@f908a000 {
+			compatible = "qcom,msm8974-hfpll", "qcom,hfpll";
+			reg = <0xf908a000 0x30>;
+			clocks = <&xo_board>;
+			clock-names = "xo";
+			#clock-cells = <0>;
+			clock-output-names = "hfpll0";
+		};
+
+		hfpll1: clock@f909a000 {
+			compatible = "qcom,msm8974-hfpll", "qcom,hfpll";
+			reg = <0xf909a000 0x30>;
+			clocks = <&xo_board>;
+			clock-names = "xo";
+			#clock-cells = <0>;
+			clock-output-names = "hfpll1";
+		};
+
+		hfpll2: clock@f90aa000 {
+			compatible = "qcom,msm8974-hfpll", "qcom,hfpll";
+			reg = <0xf90aa000 0x30>;
+			clocks = <&xo_board>;
+			clock-names = "xo";
+			#clock-cells = <0>;
+			clock-output-names = "hfpll2";
+		};
+
+		hfpll3: clock@f90ba000 {
+			compatible = "qcom,msm8974-hfpll", "qcom,hfpll";
+			reg = <0xf90ba000 0x30>;
+			clocks = <&xo_board>;
+			clock-names = "xo";
+			#clock-cells = <0>;
+			clock-output-names = "hfpll3";
 		};
 
 		sdhc_1: mmc@f9824900 {
@@ -2447,6 +2492,13 @@
 				};
 			};
 		};
+	};
+
+	kraitcc: clock-controller {
+		compatible = "qcom,krait-cc-v2";
+		#clock-cells = <1>;
+		clocks = <&hfpll0>, <&hfpll1>, <&hfpll2>, <&hfpll3>, <&hfpll_l2>;
+		clock-names = "hfpll0", "hfpll1", "hfpll2", "hfpll3", "hfpll_l2";
 	};
 
 	timer {
