@@ -583,3 +583,76 @@ carveout there, so display works the proven way.
     are implicated → bisect by re-adding topic groups on the vanilla base.
   - CP1-v resets ⇒ pure stable 6.18 + this config/environment is implicated →
     council with upstream-diff lens (6.16→6.18) before any fork work resumes.
+
+---
+
+# SESSION 3 (2026-07-31) — 6.12 DVFS: D2 attributed FAIL-BOUNDED, D3 built
+
+## D2 (isovoltage clock path) — verdict CORRECTED: FAIL-BOUNDED
+
+The prior entry ("D2 clock path PASS, storm-soak running") was premature and
+is **superseded**. A transition storm *alone* (idle, ~1170/s) ran clean to
+>2M transitions — but that was the wrong stimulus. Re-reading the 6.18
+synthesis (idle-storm clean, **pinned load** resets <30 s) reframed it: the
+one earlier reset happened under `resize2fs` **load**, not idle. A load+storm
+hunt (4 busy cores + transition storm, O2 armed) **reproduced the reset**:
+
+- ~10 min clean under load (load 5–8, 2.26M transitions, 0 HFPLL warn), then
+  the SoC reset. O2 on the recovery boot: **`previous power-off: PS_HOLD
+  (MSM-controlled shutdown)`**, `pon=0x11 warm_reset=0x0002 poff=0x0002`.
+  Not PMIC UVLO, not PMIC watchdog — an SoC-side power-hold drop.
+- Ramoops console (preserved) ends at normal boot completion (~8 s) with
+  **nothing after** through ~10 min of load → classic *silent* reset; the
+  kernel logged no WARN/oops/stall before PS_HOLD.
+- Live genpd on the failing kernel: `cx_ao` **on**, `genpd:0:cpu0` voting
+  **perf 6** — CX *was* attached (the boot `-517` were transient defers that
+  resolved). CX is **not** the cause.
+- Mechanism: D2 drives **no** Krait APC/L2 rail voltage (`cpu-supply` absent).
+  Under sustained load the rail has no per-OPP margin → IR-drop brownout →
+  PS_HOLD. CX-pinning at super_turbo only stretched MTBF (6.18 <30 s → 6.12
+  ~10 min), it did not remove the failure.
+- Evidence: `~/Projects/msm8974-scratch/evidence/d2-psh-reset-20260731/`
+  (console-ramoops-0, recovery-boot-dmesg.txt, hunt-watch.log).
+
+**⇒ D2 is not safe under load; the fix is not in the clock layer.**
+
+## D3 (SAW2 gang-rail voltage) — BUILT, pre-registered soak pending
+
+Fix = give the OPP layer a regulator for the shared Krait gang rail. Ported
+from the fork's 6.18 line, **no invented values** (oracle FP2 confirms the
+working stack scales to 2265600 kHz with voltage tracking):
+
+- **Driver** `6.12/topic/spm-gangrail` (`c6ccc851bb50`): `spm.c` end-state of
+  the 9 gang-rail commits (`401fec35e189..0e91a5cc7bec`). 6.12 had already
+  dropped the per-CPU v2.1 infra upstream, so the chain does not cherry-pick
+  (add-then-remove of code 6.12 lacks); squashed to the reviewed end state
+  (margin add+remove nets to none → no `margin_sel`; `set_vdd_ret` present;
+  new `qcom,msm8974-saw2-v2.1-l2` → `spm_reg_8974_8084_l2`,
+  `smp_set_vdd_v2_1_l2` clears VCTL PORT, writes vlevel, verifies PMIC_STS).
+- **DT** on `6.12/topic/krait-cpufreq` (`fcf7046e2596`): `saw_l2_vreg`
+  regulator child (350000–1275000 µV) under `saw_l2`; `cpu-supply =
+  <&saw_l2_vreg>` on all 4 cores (single shared rail); per-OPP `opp-microvolt`
+  triplets, our die `speed1-pvs12-v1` = **800/800/800/800/810/820 mV** across
+  300/422.4/652.8/729.6/883.2/960. **One variable vs D2:** freq cap stays at
+  960 MHz — add voltage, not higher OPPs. CX stays pinned super_turbo.
+- **Config:** `CONFIG_QCOM_SPM=y` pinned built-in (regulator registers before
+  cpufreq probes cpu-supply).
+- **Integration** `6.12/int/d3` (`fed71b1e5917`) = staging(D0+D1) +
+  krait-cpufreq(D2+D3 DT) + spm-gangrail + pon-reason(O2). Merged clean.
+  Build running (defconfig `fairphone2_612d3_defconfig`, SHA-pinned).
+
+### D3 pre-registered pass/fail (soak arithmetic)
+
+- **Stimulus:** the exact hunt that killed D2 — 4-core busy load + transition
+  storm, O2 armed, reset-watcher reads PON on recovery. (Must use the *load*
+  stimulus; idle storm is known not to trigger it.)
+- **PASS (rail fix proven):** survives the load-storm **≥ 40 min** clean
+  (~4× the observed ~10 min load-MTBF ⇒ >95% exclusion of that class), then
+  extend toward the §1.1 gate (≥60 min, ideally overnight, idle+load).
+- **FAIL:** any reset. Read PON: still `PS_HOLD` ⇒ voltage values/approach
+  need revisiting (check live `saw_l2_vreg` voltage vs opp-microvolt, and
+  whether set_vdd is actually reaching the SAW2); UVLO ⇒ rig/power artifact.
+- **First check on the D3 boot (before soak):** `regulator_summary` shows
+  `saw_l2_vreg` present and at the OPP voltage; `dmesg` shows spm bound
+  `saw2-v2.1-l2` and **no** lingering `Failed to set OPP config`; cpufreq
+  cur_freq follows setspeed.
