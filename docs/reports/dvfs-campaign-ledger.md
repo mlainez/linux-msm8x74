@@ -109,6 +109,52 @@ reverts to the last anchor on fail. Full port manifest:
   undervolt/overvolt config onto the device at the end of a long session.
   Next session resumes here with the genpd/required-opps design.
 
+- **D2 IMPLEMENTED + RESULT (2026-07-31): clock path PASS, storm FAIL-UNKNOWN.**
+  Integration `6.12/int/d2` (`9acda161090a`), one-variable diff vs D1 (OPP DT +
+  cpufreq match_data). Wiring: 6.12 `match_data_krait` has NO genpd/cpu-supply
+  (pure clock); added `match_data_msm8974` attaching the rpmpd `"cx"` domain.
+  - **Clock path PASS:** cpufreq exposes the capped 300–960 MHz table; sweep
+    confirmed krait-cc REALLY reprograms the hardware (set 300→mux 307 MHz, set
+    960→hfpll0 960 MHz, set 422→hfpll0 844.8 MHz÷2); CX corner pinned at perf
+    state 6 (super_turbo), `cx_ao on 6` held by cpu0 — genpd+required-opps works;
+    zero HFPLL WARN.
+  - **Transition-storm FAIL:** an aggressive detached storm (~400 transitions/s)
+    ran ~2500 iters (up 190→196 s, warn=0) then **reset the SoC** — on battery
+    (UVLO excluded), isovoltage, CX pinned. So **rapid clock transitions alone
+    destabilise the SoC, independent of voltage scaling** — a major narrowing
+    (the isovoltage isolation did its job).
+  - **UNATTRIBUTED — observability gap:** the storm reset was *harder* than a
+    normal reboot — ramoops did NOT preserve the dead boot's console (DRAM lost;
+    contrast D0's warm reboots, which preserved it), and 6.12 does not print the
+    PON reason (the fork's `pon-reason` topic is NOT ported). So warm/PS_HOLD vs
+    hard vs watchdog is unknown. Per blueprint §6, **STOP — do not patch a guess.**
+  - **Verdict: FAIL-UNKNOWN.** D2 NOT merged; anchor stays D1. Device runs the
+    D2 image (stable at normal governor; only the pathological storm resets).
+- **Next action (back to P1 — observability first):** port the reset-reason
+  instrument to 6.12 before any more DVFS — the fork's `pon-reason` topic (PON
+  reason print at boot) so a storm reset is attributable, and verify ramoops
+  captures a storm reset (may need the reset to be warm/recoverable). Only then
+  re-run the D2 storm for an attributable verdict, and throttle the storm to a
+  realistic rate as one axis (400/s is pathological; a governor-realistic storm
+  is the real target). This mirrors the O-layer gate the ladder skipped on 6.12.
+
+- **O2 ported + D2 storm RE-RUN (2026-07-31, corrected):** ported the fork's
+  `pon-reason` reporter to 6.12 (`6.12/topic/pon-reason`; adapted the
+  6.18 `qcom_pon`→6.12 `pm8916_pon` rename). Confirmed working: boot now prints
+  `pm8916-pon … previous power-off: <reason>`. Rebuilt D2+O2 integration
+  (staging + krait-cpufreq + pon-reason). **The earlier storm reset did NOT
+  reproduce:** a *confirmed* inline storm did **105,360 transitions at ~1170/s
+  over 90 s with zero HFPLL WARN and no reset**. So the one-off reset was
+  non-deterministic (early-boot timing / fluke), not a deterministic clock-path
+  failure — the isovoltage clock path is robust under transition stress. (The
+  first "survived 120 s" was a false pass: the detached storm had silently died;
+  caught by checking the governor + empty log. Now launched as a verified
+  `start-stop-daemon`.)
+- **D2 status: clock path PASS; long storm-soak RUNNING** (target ≥ ~75 min to
+  exclude the ~19 min-MTBF class at 95%, per §7) with O2 armed to attribute any
+  reset. On clean soak → D2 PASS, merge to staging as the D3 anchor. Any reset →
+  O2 prints the PON reason at recovery (PS_HOLD vs watchdog vs UVLO) → bounded.
+
 ---
 
 ## State of knowledge (seed, from PLAN §2 — confirmed 2026-07-30)
