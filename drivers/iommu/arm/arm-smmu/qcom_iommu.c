@@ -135,6 +135,7 @@ struct qcom_iommu_dev {
 	 */
 	bool			 is_msm8974;
 	struct delayed_work	 dbg_work;   /* DEBUG: CB state dump */
+	bool			 bfb_written;
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -197,6 +198,41 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 }
 
 static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
+
+/*
+ * Vendor BFB/prefetch block: implementation-defined SMMU global registers
+ * (base + 0x2008..0x2540) that downstream programs on every 8974 SMMU --
+ * explicitly including TZ-managed ones ("bfb settings are always programmed
+ * by HLOS", vendor msm_iommu_sec.c) -- via qcom,iommu-bfb-regs/-data pairs
+ * in the vendor DT. They configure fetch/prefetch behaviour; without them a
+ * real-time master (MDP scanout) fetches through an untuned SMMU.
+ * Values are taken from the vendor DT and carried in the same properties.
+ */
+static void qcom_iommu_write_bfb(struct qcom_iommu_dev *qcom_iommu)
+{
+	struct device_node *np = qcom_iommu->dev->of_node;
+	int nregs, ndata, i;
+	u32 off, val;
+
+	if (qcom_iommu->bfb_written || !qcom_iommu->local_base)
+		return;
+
+	nregs = of_property_count_u32_elems(np, "qcom,iommu-bfb-regs");
+	ndata = of_property_count_u32_elems(np, "qcom,iommu-bfb-data");
+	if (nregs <= 0 || nregs != ndata)
+		return;
+
+	for (i = 0; i < nregs; i++) {
+		of_property_read_u32_index(np, "qcom,iommu-bfb-regs", i, &off);
+		of_property_read_u32_index(np, "qcom,iommu-bfb-data", i, &val);
+		writel_relaxed(val, qcom_iommu->local_base + off);
+	}
+	/* ensure BFB writes land before any translation traffic */
+	wmb();
+
+	dev_info(qcom_iommu->dev, "programmed %d BFB registers\n", nregs);
+	qcom_iommu->bfb_written = true;
+}
 
 static void qcom_iommu_tlb_sync(void *cookie)
 {
@@ -526,6 +562,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 				goto out_err;
 			}
 			ctx->secure_init = true;
+			qcom_iommu_write_bfb(qcom_iommu);
 		}
 
 		/* Secured QSMMU-500/QSMMU-v2 contexts cannot be programmed */

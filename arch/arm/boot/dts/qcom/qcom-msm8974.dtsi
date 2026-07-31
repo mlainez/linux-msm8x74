@@ -2152,6 +2152,14 @@
 			 * SMMU_INTR_SEL_NS write (see qcom_iommu.c).
 			 */
 			ranges = <0 0xfd930000 0x3000>;
+			/*
+			 * Global window, mapped ONLY for the BFB block below
+			 * (base+0x2008..0x2540, HLOS-programmed even on this
+			 * TZ-managed SMMU). The fatal 8916-style INTR_SEL_NS
+			 * write at +0x2000 is compatible-gated off in the
+			 * driver for msm8974.
+			 */
+			reg = <0xfd928000 0x8000>;
 			clocks = <&mmcc MDSS_AHB_CLK>,
 				 <&mmcc MDSS_AXI_CLK>;
 			clock-names = "iface", "bus";
@@ -2159,6 +2167,17 @@
 			interconnects = <&mmssnoc MNOC_MAS_MDP_PORT0 &bimc BIMC_SLV_EBI_CH0>;
 			/* TrustZone owns the global space / stream mapping. */
 			qcom,iommu-secure-id = <1>;
+			/* Vendor fetch/prefetch tuning (msm8974-v2-iommu.dtsi). */
+			qcom,iommu-bfb-regs =  <0x204c 0x2050 0x2514 0x2540
+						0x256c 0x20ac 0x215c 0x220c
+						0x2314 0x2394 0x2414 0x2008
+						0x200c 0x2010 0x2014 0x2018
+						0x201c 0x2020>;
+			qcom,iommu-bfb-data =  <0xffffffff 0x0 0x4 0x10
+						0x0 0x6800 0x6221 0x16231
+						0x0 0x34 0x74 0x0
+						0x0 0x0 0x0 0x0
+						0x0 0x0>;
 			/*
 			 * Keep disabled in the SoC dtsi: probing it without the
 			 * display stack up (headless boards) touches the MMSS
