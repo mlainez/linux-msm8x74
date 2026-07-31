@@ -764,3 +764,40 @@ fork's own ~3× mitigation 4b2508 (disarm L2 SPM seq + irq-off across the VCTL
 write) which THIS port omits; coeff+load policy B; bisect the 6.12↔6.18 delta;
 or accept fixed-frequency (stable for hours) / no free DVFS as the shippable
 6.12 and keep the reset as tracked research.
+
+## D3-preempt + ROOT CAUSE CONFIRMED (2026-08-01) — collapse-vs-write overlap
+
+Vendor source analysis (fp2 BSP, subagent) found the one thing the vendor does
+around the register-identical VCTL write that we don't: it runs it
+**preemption-disabled** (get_cpu/put_cpu) and pins the whole transition to the
+target CPU at SCHED_FIFO, so the writing CPU cannot be scheduled away or enter
+cpuidle mid-handshake. (Also affirmatively confirmed phase/FTS is NOT the
+vendor mechanism — use-phase-switching absent — matching the A/B.)
+
+Fix 1 — **preempt_disable() around the L2 set_vdd** (spm-gangrail
+`4c98238ddbd0`, int/d3 `015852295b26`): idle-storm survived **~540k flips /
+~190 s** vs D3's ~100k / 13–37 s — a **~5×** gain. Root-cause direction
+validated, but still eventually reset (preempt-off covers only the SAW write,
+not the sleeping clk_set_rate that follows).
+
+Fix 2 discriminator — **disable the per-core `cpu-spc` deep-idle state**
+(runtime, all 4 CPUs) on top of preempt-fix: idle-storm ran **1.8M+ flips /
+550s+ with ZERO resets** and still going. **This confirms the mechanism:** the
+per-core SPM **power-collapse** (`cpu-spc`) running concurrently with the L2
+gang-rail VCTL write corrupts the shared SAW/rail → silent PS_HOLD. Preempt-off
+stops the *local* core collapsing during the write (the 5×); disabling cpu-spc
+removes the collapse entirely (the rest).
+
+**First stable free-DVFS configuration on this fork:** preempt-off + cpu-spc
+disabled. Costs per-core deep-idle power (cores idle at WFI, not power-collapse)
+— a documented tradeoff, not the power-optimal end state. 60-min + load soak
+running (watcher).
+
+Next (power-optimal, future): instead of disabling cpu-spc, *coordinate* it —
+serialize the gang VCTL write against per-core collapse (the vendor keeps
+cpuidle AND does DVFS). Candidate: preempt-off (have it) + a lock/gate shared
+between smp_set_vdd_v2_1_l2 and the cpuidle-enter path, and/or the vendor's
+retention-floor IPI. For a shippable stable-DVFS milestone now, disable cpu-spc
+via DT/kernel default; optimize idle power afterward. Persist the cpu-spc
+disable (DT idle-state removal or default-disabled) — the runtime sysfs setting
+is lost on reboot.
