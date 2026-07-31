@@ -6,6 +6,51 @@
 
 ---
 
+## 6.12 DVFS series (SES3, 2026-07-31) — incremental ACU ladder
+
+Anchor floor: `citronics-fp2-6.12-r1` (`69eea3a9f8f7`, no CPU DVFS, shipped, known
+good). Each rung is ONE variable on the previous validated anchor, its own topic
+off `6.12/baseline`, merged into a throwaway `6.12/int/<rung>` for the image, and
+reverts to the last anchor on fail. Full port manifest:
+`~/Projects/msm8974-scratch/DVFS-6.12-PORT-MANIFEST.md`. Ladder: D0 xpu-err-fatal
+→ D1 clock plumbing → D2 isovoltage sweep (CP3) → D3 DVFS+voltage CX-pinned (CP4)
+→ D4 thermal (CP6).
+
+### D0 — xpu-err-fatal prerequisite *(pre-registered before run)*
+- **Hypothesis:** arming TZ XPU (memory-protection) err-fatal on 6.12 is a
+  no-op for the stable no-DVFS baseline (no frequency change), and is the
+  prerequisite that makes later DVFS load survivable (6.18: unusable without it,
+  resets 0.5–2 min under load).
+- **Single variable vs r1:** +`6.12/topic/xpu-err-fatal` (2 commits, ported from
+  6.18 b34e71475156 + 729ef9a8c17a; SCM-wrapper conflict resolved by keeping only
+  the XPU block, dropping GPU-aperture funcs 6.12 lacks). Integration
+  `6.12/int/d0` = `0ffbf4964e8b`; diff vs r1 = only the 3 xpu files (verified).
+- **Criteria:** PASS = (a) no regression vs r1 — boots 3×, display+sensors+wlan+
+  modem up; (b) XPU readback confirms armed (`qcom_scm.xpu_errfatal=2` reads
+  enabled, or dmesg `xpu_err_fatal(config=…) -> 0`); (c) baseline stable under a
+  brief 4-core busy-loop at the fixed boot freq. FAIL = any regression/reset.
+  *(Load-survival BENEFIT is only measurable once DVFS drives higher freqs — D2+;
+  D0 only proves no-regression + armed.)*
+- **Result: PASS** (2026-07-31, battery FP2 e4f4c070). Caught a real port
+  bug first: arming silently no-op'd because the fork's `late_initcall_sync`
+  runs before `firmware:scm` probes — on 6.12 scm defers behind the
+  `fc400000` GCC clock-controller (devlink confirmed), so `__scm` was NULL
+  and the init bailed at `qcom_scm_is_available()`. The 6.18 ordering
+  happened to work. **Fix:** arm from `qcom_scm_probe()` (helper, forward-decl)
+  instead of a fixed-time initcall. After fix: `qcom_scm firmware:scm:
+  xpu_err_fatal(config=0) -> 0` at t=0.97s, DT-driven, on **3/3 boots**;
+  no regression (display/sensors/wlan/modem); survived 60s 4-core load +
+  ~11 min continuous uptime, zero resets. Topic re-split into 2 clean commits
+  (`d675bcd7` wrapper+probe-arm, `c90b48c4` DT); merged to `6.12/staging`
+  (`12310d315c52`), pushed. **New anchor for D1.** (Load-survival benefit
+  still unmeasured — needs DVFS; per pre-registration, D0 only claims
+  no-regression + armed, both confirmed.)
+- **Ledger note (method win):** the incremental gate turned an invisible
+  "DVFS resets under load on 6.12" into a named, one-cause, fixed
+  prerequisite bug — the whole point of not bulk-porting.
+
+---
+
 ## State of knowledge (seed, from PLAN §2 — confirmed 2026-07-30)
 
 **Ruled out, with evidence (do not re-litigate without NEW evidence):**
