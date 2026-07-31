@@ -127,7 +127,7 @@
 		};
 	};
 
-	led-controller@36 {
+	backlight: led-controller@36 {
 		compatible = "ti,lm3630a";
 		reg = <0x36>;
 
@@ -190,6 +190,55 @@
 	compatible = "qcom,gcc-msm8974pro-ac";
 };
 
+&gpu {
+	status = "okay";
+};
+
+&mdss {
+	status = "okay";
+};
+
+&mdss_dsi0 {
+	status = "okay";
+
+	vdda-supply = <&pm8941_l2>;
+	vdd-supply = <&pm8941_l22>;
+	vddio-supply = <&pm8941_l12>;
+
+	panel: panel@0 {
+		reg = <0>;
+		compatible = "jdi,lpm055a081ab5";
+
+		vdd-supply = <&pm8941_l22>;
+		vddio-supply = <&pm8941_l12>;
+
+		backlight = <&backlight>;
+
+		enable-gpios = <&tlmm 58 0>;
+		reset-gpios = <&pm8941_gpios 19 0>;
+
+		pinctrl-names = "default";
+		pinctrl-0 = <&panel_pin>;
+
+		port {
+			panel_in: endpoint {
+				remote-endpoint = <&mdss_dsi0_out>;
+			};
+		};
+	};
+};
+
+&mdss_dsi0_out {
+	remote-endpoint = <&panel_in>;
+	data-lanes = <0 1 2 3>;
+};
+
+&mdss_dsi0_phy {
+	status = "okay";
+
+	vddio-supply = <&pm8941_l12>;
+};
+
 &pm8941_coincell {
 	qcom,rset-ohms = <800>;
 	qcom,vset-millivolts = <3200>;
@@ -213,7 +262,6 @@
 
 &pronto {
 	vddmx-supply = <&pm8841_s1>;
-	vddcx-supply = <&pm8841_s2>;
 	vddpx-supply = <&pm8941_s3>;
 
 	pinctrl-names = "default";
@@ -239,10 +287,17 @@
 };
 
 &remoteproc_adsp {
-	cx-supply = <&pm8841_s2>;
-
 	status = "okay";
 };
+
+/* Broken
+&remoteproc_mss {
+	mss-supply = <&pm8841_s3>;
+	mx-supply = <&pm8841_s1>;
+	pll-supply = <&pm8941_l12>;
+	status = "okay";
+};
+*/
 
 &rpm_requests {
 	regulators-0 {
@@ -251,12 +306,6 @@
 		pm8841_s1: s1 {
 			regulator-min-microvolt = <675000>;
 			regulator-max-microvolt = <1050000>;
-		};
-
-		pm8841_s2: s2 {
-			regulator-min-microvolt = <875000>;
-			regulator-max-microvolt = <1050000>;
-			regulator-always-on;
 		};
 
 		pm8841_s3: s3 {
@@ -483,6 +532,39 @@
 			pins = "sdc1_cmd", "sdc1_data";
 			drive-strength = <4>;
 			bias-pull-up;
+		};
+	};
+
+	panel_pin: panel-state {
+		te-pins {
+			pins = "gpio12";
+			function = "mdp_vsync";
+			drive-strength = <2>;
+			bias-pull-down;
+			input-enable;
+		};
+
+		enable-pins {
+			pins = "gpio58";
+			function = "gpio";
+			drive-strength = <8>;
+			bias-disable;
+			output-high;
+		};
+
+		esd-pins {
+			pins = "gpio28";
+			function = "gpio";
+			drive-strength = <2>;
+			bias-pull-down;
+			input-enable;
+		};
+
+		unk-pins {
+			pins = "gpio62";
+			function = "gpio";
+			bias-disable;
+			output-low;
 		};
 	};
 
