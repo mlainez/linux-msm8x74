@@ -48,6 +48,18 @@ static const struct hfpll_data msm8974 = {
 	.low_vco_max_rate = 1248000000,
 	.min_rate = 537600000UL,
 	.max_rate = 2900000000UL,
+
+	/*
+	 * Seed the L register with the minimum rate (537.6 MHz / 19.2 MHz XO
+	 * = 0x1c). krait-cc enables a secondary core's HFPLL (e.g. hfpll1)
+	 * that the bootloader left unconfigured (L_VAL 0) *before* the rate
+	 * reinit runs, which makes it fail to lock and clock the core from an
+	 * unlocked PLL. init_once() only writes l_reg when .l_val is set;
+	 * give it a valid, lockable default (already-running PLLs skip
+	 * init_once, so CPU0 is untouched). The reinit overrides it with the
+	 * real rate immediately after.
+	 */
+	.l_val = 0x1c,
 };
 
 static const struct hfpll_data msm8976_a53 = {
