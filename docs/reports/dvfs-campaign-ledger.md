@@ -363,6 +363,36 @@ stops iterating and records the state of the art.
   userspace with zero fork burden; does **not** give KMS (no mode set, no
   GPU→panel compositing, no DRM panel power control) ⇒ not full 6.16 parity.
 
+### SES2-E — pivot to 6.12 LTS baseline (operator decision), display + parity achieved
+After 6.18 display proved unsolved (SES2-C/D), operator chose 6.12 as the
+production baseline: same LTS EOL (Dec 2028) but drm/msm still has the vram
+carveout there, so display works the proven way.
+- **`6.12/baseline`** (`3574d3a3652a`) = stable `linux-6.12.y` (6.12.100) +
+  msm8974-mainline `qcom-msm8974-6.12.y` (39 commits: FP2 display DT, panel
+  drivers, smd-rpm clocks, MMSSNOC fix, rpmpd, remoteproc single-PD) + docs.
+  One trivial `qcom_wcnss.c` conflict (kept stable's upstreamed form).
+  **On-device: display works first boot** — `[drm] using 192m VRAM carveout`,
+  fbcon on panel, 3/3 clean boots.
+- **`6.12/topic/adsp-sensors`** (`3a3a9eef042a`, 14 commits) = the sensors set
+  ported from the 6.18 topic (which carries -x provenance to the 6.15
+  originals). Base-drift fixes folded in (compile-caught, not cherry-pick
+  visible): the `adsp`→`pas` rename absent on 6.12; the QRTR-bus commit's
+  modpost `do_*_entry` contract and `device_find_child` const-match prototype
+  are pre-const on 6.12.
+- **`6.12/staging`** (`69eea3a9f8f7`) = baseline + adsp-sensors. **Tree verified
+  byte-identical** to the hand-validated intermediate (`a809171a86d1`), so its
+  on-device result stands without a reflash.
+- **Validation 2026-07-31 (operator gate: 2–3 clean boots, no soak — kernel is
+  production-proven, sensors non-destructive):** 3/3 clean boots, every boot:
+  display (fbcon), sensors (LSM330D accel+gyro, AK8963 mag; **live data** via
+  `adsp_sensors_demo` — accel Y≈8.9 m/s² gravity), WLAN (`wcn36xx` fw loaded,
+  `wlan0`), modem (3 remoteprocs running, `wwan0` QMI+AT). Manifest
+  `MANIFEST-612-STAGING-20260731.env`.
+- **Verdict: PASS** — release-grade by operator's gate. Next: promote to
+  `6.12/rc`/`6.12/release`, then DVFS + thermal on 6.12.
+- Infra: stable-sync workflow now syncs `6.12/{baseline,staging,rc}` from
+  `linux-6.12.y` and the 6.18 branches from `linux-6.18.y` (`a21574de7fdd`).
+
 ## Current state (updated 2026-07-31, release-baseline soak running)
 
 - **Checkpoint:** SES2-A release soak RUNNING on `6.18/baseline`
