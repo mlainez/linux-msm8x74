@@ -128,6 +128,10 @@
 		reg = <0>;
 		compatible = "fairphone,fp2-panel";
 
+		/* vendor: msm8974-mdss.dtsi vdd=l22 (3.0V), vddio=l12 (1.8V) */
+		vdd-supply = <&pm8941_l22>;
+		vddio-supply = <&pm8941_l12>;
+
 		reset-gpios = <&pm8941_gpios 19 GPIO_ACTIVE_LOW>;
 
 		pinctrl-names = "default";
