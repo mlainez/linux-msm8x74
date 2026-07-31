@@ -44,6 +44,17 @@
 			next-level-cache = <&L2>;
 			qcom,acc = <&acc0>;
 			qcom,saw = <&saw0>;
+			clocks = <&kraitcc 0>;
+			clock-names = "cpu";
+			operating-points-v2 = <&cpu_opp_table>;
+			/*
+			 * D2 isovoltage: CX corner pinned via required-opps; the
+			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
+			 * - that is D3. OPP table is capped at the 960 MHz boot
+			 * frequency so every rate stays inside the boot voltage.
+			 */
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
+			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
 		};
 
@@ -55,6 +66,17 @@
 			next-level-cache = <&L2>;
 			qcom,acc = <&acc1>;
 			qcom,saw = <&saw1>;
+			clocks = <&kraitcc 1>;
+			clock-names = "cpu";
+			operating-points-v2 = <&cpu_opp_table>;
+			/*
+			 * D2 isovoltage: CX corner pinned via required-opps; the
+			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
+			 * - that is D3. OPP table is capped at the 960 MHz boot
+			 * frequency so every rate stays inside the boot voltage.
+			 */
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
+			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
 		};
 
@@ -66,6 +88,17 @@
 			next-level-cache = <&L2>;
 			qcom,acc = <&acc2>;
 			qcom,saw = <&saw2>;
+			clocks = <&kraitcc 2>;
+			clock-names = "cpu";
+			operating-points-v2 = <&cpu_opp_table>;
+			/*
+			 * D2 isovoltage: CX corner pinned via required-opps; the
+			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
+			 * - that is D3. OPP table is capped at the 960 MHz boot
+			 * frequency so every rate stays inside the boot voltage.
+			 */
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
+			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
 		};
 
@@ -77,6 +110,17 @@
 			next-level-cache = <&L2>;
 			qcom,acc = <&acc3>;
 			qcom,saw = <&saw3>;
+			clocks = <&kraitcc 3>;
+			clock-names = "cpu";
+			operating-points-v2 = <&cpu_opp_table>;
+			/*
+			 * D2 isovoltage: CX corner pinned via required-opps; the
+			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
+			 * - that is D3. OPP table is capped at the 960 MHz boot
+			 * frequency so every rate stays inside the boot voltage.
+			 */
+			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
+			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
 		};
 
@@ -1319,6 +1363,17 @@
 			reg = <0xfc4ab000 0x4>;
 		};
 
+		qfprom_speedbin: efuse@fc4b80b0 {
+			compatible = "qcom,msm8974-qfprom", "qcom,qfprom";
+			reg = <0xfc4b80b0 0x8>;
+			#address-cells = <1>;
+			#size-cells = <1>;
+
+			speedbin_efuse: speedbin@0 {
+				reg = <0x0 0x8>;
+			};
+		};
+
 		qfprom: efuse@fc4bc000 {
 			compatible = "qcom,msm8974-qfprom", "qcom,qfprom";
 			reg = <0xfc4bc000 0x2100>;
@@ -2491,6 +2546,49 @@
 					type = "hot";
 				};
 			};
+		};
+	};
+
+	cpu_opp_table: opp-table-cpu {
+		compatible = "operating-points-v2-krait-cpu";
+		nvmem-cells = <&speedbin_efuse>;
+		opp-shared;
+
+		/*
+		 * D2 (CP3 isovoltage): frequencies capped at the 960 MHz boot
+		 * rate so the fixed boot voltage covers the whole sweep. No
+		 * opp-microvolt (no CPU-rail regulator yet); CX pinned
+		 * super_turbo. D3 adds the SAW2 gang rail + higher OPPs.
+		 */
+		opp-300000000 {
+			opp-hz = /bits/ 64 <300000000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
+			opp-supported-hw = <0xf>;
+		};
+		opp-422400000 {
+			opp-hz = /bits/ 64 <422400000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
+			opp-supported-hw = <0xf>;
+		};
+		opp-652800000 {
+			opp-hz = /bits/ 64 <652800000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
+			opp-supported-hw = <0xf>;
+		};
+		opp-729600000 {
+			opp-hz = /bits/ 64 <729600000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
+			opp-supported-hw = <0xf>;
+		};
+		opp-883200000 {
+			opp-hz = /bits/ 64 <883200000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
+			opp-supported-hw = <0xf>;
+		};
+		opp-960000000 {
+			opp-hz = /bits/ 64 <960000000>;
+			required-opps = <&rpmpd_opp_super_turbo>;
+			opp-supported-hw = <0xf>;
 		};
 	};
 
