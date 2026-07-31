@@ -1,7 +1,7 @@
 name: stable-sync
 
-# Keep 6.18/staging and 6.18/rc up to date with mainline LTS security
-# patches (linux-6.18.y). Clean merges are pushed directly; a conflict
+# Keep 6.18/staging, 6.18/rc and 6.18/baseline up to date with mainline LTS
+# security patches (linux-6.18.y). Clean merges are pushed directly; a conflict
 # opens an issue and leaves the branch untouched (resolve it manually on
 # a topic/integration round). See AGENTS.md §5.
 
@@ -22,9 +22,9 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 1        # staging first, then rc — never in parallel
+      max-parallel: 1        # staging, then rc, then baseline — never in parallel
       matrix:
-        branch: ['6.18/staging', '6.18/rc']
+        branch: ['6.18/staging', '6.18/rc', '6.18/baseline']
     steps:
       - name: Checkout ${{ matrix.branch }}
         uses: actions/checkout@v4
