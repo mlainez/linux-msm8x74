@@ -17,6 +17,7 @@
 #include "msm_drv.h"
 #include "msm_gem.h"
 #include "msm_mmu.h"
+#include "disp/msm_disp_snapshot.h"
 #include "mdp5_kms.h"
 
 static int mdp5_hw_init(struct msm_kms *kms)
@@ -210,6 +211,21 @@ static void mdp5_kms_destroy(struct msm_kms *kms)
 	mdp5_destroy(mdp5_kms);
 }
 
+static void mdp5_kms_mdp_snapshot(struct msm_disp_state *disp_state,
+				  struct msm_kms *kms)
+{
+	struct mdp5_kms *mdp5_kms = to_mdp5_kms(to_mdp_kms(kms));
+	struct resource *res;
+
+	res = platform_get_resource_byname(mdp5_kms->pdev, IORESOURCE_MEM,
+					   "mdp_phys");
+	if (!res)
+		return;
+
+	msm_disp_snapshot_add_block(disp_state, resource_size(res),
+				    mdp5_kms->mmio, "mdp5");
+}
+
 static const struct mdp_kms_funcs kms_funcs = {
 	.base = {
 		.hw_init         = mdp5_hw_init,
@@ -226,6 +242,7 @@ static const struct mdp_kms_funcs kms_funcs = {
 		.wait_flush      = mdp5_wait_flush,
 		.complete_commit = mdp5_complete_commit,
 		.destroy         = mdp5_kms_destroy,
+		.snapshot        = mdp5_kms_mdp_snapshot,
 	},
 	.set_irqmask         = mdp5_set_irqmask,
 };
