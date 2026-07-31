@@ -490,3 +490,11 @@
 	extcon = <&smbb>;
 	qcom,init-seq = /bits/ 8 <0x1 0x64>;
 };
+
+&mdp {
+	iommus = <&mdp_iommu 0>;
+};
+
+&mdp_iommu {
+	status = "okay";
+};

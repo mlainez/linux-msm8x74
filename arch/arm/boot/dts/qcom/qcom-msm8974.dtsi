@@ -2105,26 +2105,42 @@
 			#size-cells = <1>;
 			#iommu-cells = <1>;
 			compatible = "qcom,msm8974-iommu", "qcom,msm-iommu-v1";
-			ranges = <0 0xfd928000 0x10000>;
+			/*
+			 * Context-bank region only: CB0 = SMMU base + 0x8000
+			 * (the first 8 pages are the TZ-owned global space).
+			 * Anchoring ranges at CB0 makes asid == hardware CB
+			 * index == stream ID == 0 for mdp_0. Deliberately NO
+			 * "reg": on this SoC there is no 8916-style wrapper
+			 * window and SMMU base + 0x2000 is MICRO_MMU_CTRL --
+			 * mapping the global space invites the fatal
+			 * SMMU_INTR_SEL_NS write (see qcom_iommu.c).
+			 */
+			ranges = <0 0xfd930000 0x3000>;
 			clocks = <&mmcc MDSS_AHB_CLK>,
 				 <&mmcc MDSS_AXI_CLK>;
 			clock-names = "iface", "bus";
 			power-domains = <&mmcc MDSS_GDSC>;
+			interconnects = <&mmssnoc MNOC_MAS_MDP_PORT0 &bimc BIMC_SLV_EBI_CH0>;
+			/* TrustZone owns the global space / stream mapping. */
 			qcom,iommu-secure-id = <1>;
 			/*
-			 * The MDP SMMU has TrustZone-secured context banks. On a
-			 * headless board the display is unused, so leave this IOMMU
-			 * disabled: its context-bank probe must not touch the secured
-			 * SMMU (SCM restore_sec_cfg + register access) at boot, which
-			 * faults the un-arbitrated MMSS bus and resets the SoC.
-			 * Boards with a panel re-enable it via the display overlay.
+			 * Keep disabled in the SoC dtsi: probing it without the
+			 * display stack up (headless boards) touches the MMSS
+			 * bus un-arbitrated and resets the SoC. Display boards
+			 * enable it next to their panel.
 			 */
 			status = "disabled";
 
-			/* mdp_0 non-secure context bank (asid 8) */
-			iommu-ctx@8000 {
+			/*
+			 * mdp_0: CB 0, SID 0, non-secure (vendor ground truth:
+			 * msm-iommu-v1.dtsi). mdp_1/mdp_2 are qcom,secure-context
+			 * in the vendor DT and are deliberately NOT declared --
+			 * this driver would probe them and write the FSR of a
+			 * TrustZone-owned context bank.
+			 */
+			iommu-ctx@0 {
 				compatible = "qcom,msm-iommu-v1-ns";
-				reg = <0x8000 0x1000>;
+				reg = <0x0 0x1000>;
 				interrupts = <GIC_SPI 47 IRQ_TYPE_LEVEL_HIGH>;
 			};
 		};
