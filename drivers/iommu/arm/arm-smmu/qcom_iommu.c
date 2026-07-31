@@ -27,6 +27,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/workqueue.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -133,6 +134,7 @@ struct qcom_iommu_dev {
 	 * SMMU needs them exactly as much as the non-secure GPU one.
 	 */
 	bool			 is_msm8974;
+	struct delayed_work	 dbg_work;   /* DEBUG: CB state dump */
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -1098,6 +1100,40 @@ static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
 	return false;
 }
 
+/*
+ * DEBUG (mdp-iommu bring-up): dump the live context-bank state some time
+ * after attach so we can see whether the bank is actually in the
+ * translation path (SCTLR.M, our TTBR0) and whether anything faulted.
+ */
+static void qcom_iommu_dbg_work(struct work_struct *work)
+{
+	struct qcom_iommu_dev *qcom_iommu =
+		container_of(to_delayed_work(work), struct qcom_iommu_dev, dbg_work);
+	int i;
+
+	if (pm_runtime_resume_and_get(qcom_iommu->dev) < 0)
+		return;
+
+	for (i = 0; i <= qcom_iommu->max_asid; i++) {
+		struct qcom_iommu_ctx *ctx = qcom_iommu->ctxs[i];
+
+		if (!ctx)
+			continue;
+		dev_info(qcom_iommu->dev,
+			 "DBG ctx asid=%d domain=%d SCTLR=%08x TTBR0=%08x%08x TCR=%08x FSR=%08x FAR=%08x%08x\n",
+			 ctx->asid, ctx->domain != NULL,
+			 iommu_readl(ctx, ARM_SMMU_CB_SCTLR),
+			 (u32)(iommu_readq(ctx, ARM_SMMU_CB_TTBR0) >> 32),
+			 (u32)iommu_readq(ctx, ARM_SMMU_CB_TTBR0),
+			 iommu_readl(ctx, ARM_SMMU_CB_TCR),
+			 iommu_readl(ctx, ARM_SMMU_CB_FSR),
+			 (u32)(iommu_readq(ctx, ARM_SMMU_CB_FAR) >> 32),
+			 (u32)iommu_readq(ctx, ARM_SMMU_CB_FAR));
+	}
+
+	pm_runtime_put(qcom_iommu->dev);
+}
+
 static int qcom_iommu_device_probe(struct platform_device *pdev)
 {
 	struct device_node *child;
@@ -1204,6 +1240,11 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	if (!qcom_iommu->nonsecure && dev->pm_domain)
 		pm_runtime_forbid(dev);
 
+	/* DEBUG (mdp-iommu bring-up): dump CB state 20 s after probe. */
+	INIT_DELAYED_WORK(&qcom_iommu->dbg_work, qcom_iommu_dbg_work);
+	if (qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure)
+		schedule_delayed_work(&qcom_iommu->dbg_work, 20 * HZ);
+
 	/* register context bank devices, which are child nodes: */
 	ret = devm_of_platform_populate(dev);
 	if (ret) {
@@ -1250,6 +1291,7 @@ static void qcom_iommu_device_remove(struct platform_device *pdev)
 {
 	struct qcom_iommu_dev *qcom_iommu = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&qcom_iommu->dbg_work);
 	pm_runtime_force_suspend(&pdev->dev);
 	platform_set_drvdata(pdev, NULL);
 	iommu_device_sysfs_remove(&qcom_iommu->iommu);
