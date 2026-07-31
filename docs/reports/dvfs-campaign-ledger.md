@@ -656,3 +656,44 @@ working stack scales to 2265600 kHz with voltage tracking):
   `saw_l2_vreg` present and at the OPP voltage; `dmesg` shows spm bound
   `saw2-v2.1-l2` and **no** lingering `Failed to set OPP config`; cpufreq
   cur_freq follows setspeed.
+
+## D3 RESULT (2026-07-31) — gang rail works, but per-transition write RESETS
+
+D3 built, flashed, functionally verified: `qcom_spm` bound `f9012000`,
+`saw_l2_vreg` (regulator name "spm") registered 350–1275 mV, and the rail
+**tracks frequency** (300–652=800, 729=805, 883=825, 960=835 mV; ~+15 mV over
+the speed1-pvs12-v1 spec, safe). So the OPP→regulator→SAW2 path is live — the
+load margin D2 lacked is present.
+
+**But D3 resets under frequency-transition stress, silently, and FASTER than
+D2:**
+- Pinned storm+4-core load: reset in **~8–20 s** (`warm_reset=0x0002`, silent
+  PS_HOLD, ramoops shows no spm/saw/WARN).
+- **Idle storm (transitions only, NO load): reset in ~37 s** (126000 iters at
+  3400/s), same silent PS_HOLD. **D2 survived this same idle-storm
+  indefinitely** (>2M transitions). Evidence:
+  `~/Projects/msm8974-scratch/evidence/d3-reset-20260731/`.
+
+**⇒ Diagnosis:** the reset is caused by the **per-transition SAW2 gang-rail
+voltage write** (`smp_set_vdd_v2_1_l2`), not by load and not by the clock path.
+D2 (no voltage writes, static rail) is transition-stable; D3 (writes the SAW2
+VCTL on every OPP change) is not. The storm is not "invalid" after all — the
+idle variant carries no load yet still resets, so this is a real per-write
+fault, not the undervolt-under-forced-load artifact I first suspected.
+
+**Unifying hypothesis for the campaign's core silent reset:** if each gang-rail
+voltage write has a small per-write probability of glitching the rail → PS_HOLD,
+then rate explains MTBF: storm 3400/s → 37 s; a real governor a few/s → the
+notorious 5–20 min. The 37 s repro is a **fast, reliable handle on the bug** —
+far better than the field's minutes-to-hours.
+
+**This is a §3.1 debugging wall** (hardware symptom, 2 attempts, >1 h). Stop
+guessing; walk the authority order for the *correct* Krait voltage-transition
+sequence (ordering vs the clock change, ramp/settle, locking vs per-CPU SAW
+cpuidle, PMIC handshake). Note the 9 ported commits are the fork's 6.18
+*attempt*; whether 6.18 ever soaked stable with them is itself an open question
+to check (fork history). Candidate angles: (a) is `smp_set_vdd_v2_1_l2` missing
+a ramp/settle or a lock the vendor holds; (b) does mainline msm8974 even drive
+APC voltage, or is the SAW2 gang-rail a downstream invention that should be
+replaced by a static safe rail (D2 was transition-stable); (c) the excluded
+margin commit a0386dc2a86e.
