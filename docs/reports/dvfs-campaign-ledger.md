@@ -219,6 +219,63 @@ branch or drop, before CP3.
   the ramoops node (`ramoops@30f80000` — vanilla DT has none), console→ramoops
   live, all 3 remoteprocs running on pure stable, soak-logger sampling to
   `/root/soak` (rootfs), idle temps 37–53 °C. *(soak outcome pending)*
+- **Interim read 2026-07-31 morning (read-only, soak undisturbed):** single
+  boot-id, uptime 30 645 s ≈ **8.5 h continuous**, 1019 unbroken samples,
+  temps 37–48 °C, zero resets. P(8.5 h clean | fork's ~47 min MTBF) ≈ 2×10⁻⁵ —
+  the fork tree's idle-reset mechanism is effectively absent on pure v6.18.39.
+  Gate remains the pre-registered 21 h (~19:00 UTC). Note: overnight the phone
+  ran on an external supply with NO host link; the console-ramoops record
+  recovered this morning (17 KB, a boot cut at t=0.64 s) is the interrupted
+  boot from last night's flash entry, archived in
+  `~/Projects/msm8974-scratch/artifacts/fp2-dut/20260731-cp1v-interim/`.
+- **FINAL (2026-07-31, soak ended early by operator direction): PASS-CAVEAT.**
+  **8.7 h continuous clean** (uptime 31 368 s, 1043 gap-free samples, max load
+  0.71, temps ≤ 54 °C). Caveat: 8.7 h < the pre-registered 21 h — bounds
+  MTBF > ~2.9 h at 95 %, and excludes the fork's ~47 min mode at
+  P ≈ 2×10⁻⁵. Stopped to build the operator-directed release baseline (SES2-A).
+  Archived: `~/Projects/msm8974-scratch/artifacts/fp2-dut/20260731-cp1v-final/`.
+- **KEY FINDING — the l24 event is benign on vanilla:** `l24: voltage operation
+  not allowed` fired at t=649 s AND t=30 507 s during the clean soak; the
+  system survived both. On the fork tree the same message was the last line
+  before the PS_HOLD death (SES1-G). So the actor (USB/charger event path —
+  phone was on a charger overnight) is routine; the fork differs in what
+  follows. **Top-ranked new hypothesis: the fork's `xpu-err-fatal` topic arms
+  TZ XPU err-fatal, converting an (otherwise silently-demoted) XPU violation
+  on that event path into a TZ-initiated PS_HOLD reset.** Disproof experiment
+  (cheap, single-variable): vanilla v6.18.41 + ONLY the two xpu-err-fatal
+  commits → if it resets at a charger/l24 event, hypothesis confirmed; if it
+  soaks clean, refuted. Pre-register before running.
+
+---
+
+## SES2 / 2026-07-31 / session 2: release baseline
+
+### SES2-A — ultimate baseline: v6.18.41 + adsp-sensors (operator-directed)
+- **Hypothesis:** latest LTS (v6.18.41) plus ONLY the adsp-sensors topic is
+  idle-stable (the release shape: LTS security current, sensors working, no
+  DVFS, no other fork topics — notably NO xpu-err-fatal arming).
+- **Tree:** new branch `6.18/baseline` = `02d768689518eb854a72d9fd49c89182b1ebb1b7`
+  (merge --no-ff of `6.18/topic/adsp-sensors` @ 4df870bacbe8, 16 commits based
+  on v6.18.39, onto stable `2fe596715f84` "Linux 6.18.41"). Clean merge; the
+  build is the compile-drift check. Topic includes `7d004ab4e69d` (rpmpd
+  power domains) — already ruled out as a reset cause with evidence.
+- **Two deltas vs CP1-v** (accepted, operator call): stable .39→.41 and the
+  adsp topic. If this baseline fails its soak, bisect between those two.
+- **Manifest:** `fairphone2_baseline_defconfig` (same config lineage: nodvfs
+  fragment, display DTB, lk2nd-injected ramoops, soak-logger→/root/soak).
+- **Criteria (pre-registered):** ≥ 21 h continuous clean idle+light-load,
+  gap-free telemetry, zero unexplained boots ⇒ baseline blessed as the
+  release candidate lineage; longer accumulation (CP7-style) continues on it.
+  Sensors acceptance at flash time: qcom_smgr discovers the LSM330D accel/gyro
+  + AK8963 mag in dmesg, adsp remoteproc running.
+- **Result: flashed and validated 2026-07-31; RELEASE SOAK RUNNING** (soak-log
+  epoch 1785480862). Validation: 6.18.41 = single modules dir; **display DTB
+  only** (operator requirement — no headless artifact in image, extlinux `fdt`
+  verified pre-flash); zero cpufreq policies; ramoops registered at
+  0x30f80000 with console mirroring; **sensors PASS** (qcom_smgr discovered
+  LSM330D accel + gyro, AK8963 mag at t≈7.6 s); all 3 remoteprocs running;
+  soak-logger sampling to /root/soak. `6.18/baseline` and the topic pushed to
+  origin. *(soak verdict pending — gate ≥ 21 h)*
 - **Instrument caveats on vanilla:** the PON-reason dmesg prints are a FORK
   patch (`6.18/topic/pon-reason`) — vanilla logs no power-off reason at boot.
   Evidence chain for this soak = ramoops console + fsync'd telemetry; PON
@@ -233,7 +290,23 @@ branch or drop, before CP3.
 
 ---
 
-## Current state (end of session, updated 2026-07-31 early)
+## Current state (updated 2026-07-31, release-baseline soak running)
+
+- **Checkpoint:** SES2-A release soak RUNNING on `6.18/baseline`
+  (`02d768689518` = v6.18.41 + adsp-sensors only; display DTB). Gate: ≥ 21 h
+  clean → bless as release lineage. CP1-v closed PASS-CAVEAT (8.7 h clean).
+  CP1 fork-no-DVFS remains FAIL-UNKNOWN with the XPU-err-fatal hypothesis
+  top-ranked (disproof experiment pre-registered in SES1-H FINAL).
+- **Images:** release baseline = `output-fp2/images/sdcard.img`
+  (`MANIFEST-BASELINE-20260731.env`). Vanilla-6.18.39, BV-A, BV-B all
+  preserved with manifests in `~/Projects/msm8974-scratch/preserved/`.
+- **Single next action:** leave the release soak untouched ≥ 21 h; then read
+  `/root/soak/` + pstore before anything else. On PASS: decide promotion
+  (staging rebuild from `6.18/baseline`?) with the operator, run the
+  xpu-err-fatal disproof next, and re-add topics one soak-rung at a time
+  (~2.5 h rungs suffice against the 47-min mode).
+
+## Previous state (end of session 1, superseded)
 
 - **Checkpoint:** CP1 (fork tree, no DVFS) = **FAIL-UNKNOWN** after one ~47.5 min
   idle PS_HOLD reset (SES1-G) — the fork tree resets at idle without the DVFS
