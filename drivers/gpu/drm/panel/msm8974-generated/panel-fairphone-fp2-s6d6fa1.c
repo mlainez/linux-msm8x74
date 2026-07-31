@@ -8,6 +8,7 @@
 #include <linux/gpio/consumer.h>
 #include <linux/mod_devicetable.h>
 #include <linux/module.h>
+#include <linux/regulator/consumer.h>
 
 #include <video/mipi_display.h>
 
@@ -20,6 +21,7 @@ struct s6d6fa1 {
 	struct drm_panel panel;
 	struct mipi_dsi_device *dsi;
 	struct gpio_desc *reset_gpio;
+	struct regulator_bulk_data supplies[2];
 };
 
 static inline struct s6d6fa1 *to_s6d6fa1(struct drm_panel *panel)
@@ -193,12 +195,25 @@ static int s6d6fa1_prepare(struct drm_panel *panel)
 	struct device *dev = &ctx->dsi->dev;
 	int ret;
 
+	/*
+	 * Panel power per the vendor DT (msm8974-mdss.dtsi: vdd = pm8941 l22,
+	 * vddio = pm8941 l12). Without an explicit consumer the regulator
+	 * core's unused-regulator cleanup switches l22 off ~30 s after boot
+	 * and the (otherwise fully working) panel goes dark.
+	 */
+	ret = regulator_bulk_enable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
+	if (ret < 0) {
+		dev_err(dev, "Failed to enable regulators: %d\n", ret);
+		return ret;
+	}
+
 	s6d6fa1_reset(ctx);
 
 	ret = s6d6fa1_on(ctx);
 	if (ret < 0) {
 		dev_err(dev, "Failed to initialize panel: %d\n", ret);
 		gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+		regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
 		return ret;
 	}
 
@@ -216,6 +231,7 @@ static int s6d6fa1_unprepare(struct drm_panel *panel)
 		dev_err(dev, "Failed to un-initialize panel: %d\n", ret);
 
 	gpiod_set_value_cansleep(ctx->reset_gpio, 1);
+	regulator_bulk_disable(ARRAY_SIZE(ctx->supplies), ctx->supplies);
 
 	return 0;
 }
@@ -313,6 +329,13 @@ static int s6d6fa1_probe(struct mipi_dsi_device *dsi)
 				   DRM_MODE_CONNECTOR_DSI);
 	if (IS_ERR(ctx))
 		return PTR_ERR(ctx);
+
+	ctx->supplies[0].supply = "vdd";
+	ctx->supplies[1].supply = "vddio";
+	ret = devm_regulator_bulk_get(dev, ARRAY_SIZE(ctx->supplies),
+				      ctx->supplies);
+	if (ret < 0)
+		return dev_err_probe(dev, ret, "Failed to get regulators\n");
 
 	ctx->reset_gpio = devm_gpiod_get(dev, "reset", GPIOD_OUT_HIGH);
 	if (IS_ERR(ctx->reset_gpio))
