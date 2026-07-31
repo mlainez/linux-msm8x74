@@ -414,6 +414,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 	struct io_pgtable_ops *pgtbl_ops = NULL;
 	struct io_pgtable_cfg pgtbl_cfg;
+	bool use_v7s = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
 	int i, ret = 0;
 	u32 reg;
 
@@ -440,10 +441,23 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		pgtbl_cfg = io_pgtable_ops_to_pgtable(qcom_domain->pgtbl_ops)->cfg;
 	} else {
+		/*
+		 * The TZ-managed msm8974 MMSS SMMU (the MDP instance) does not
+		 * implement LPAE context banks: the vendor msm-iommu-v1 driver
+		 * programs TTBCR=0 with an ARMv7 short-descriptor first-level
+		 * table and PRRR/NMRR attributes, on every 8974 SMMU. With an
+		 * LPAE table the bank "translates" garbage: no context fault,
+		 * black scanout, and occasional fetches into protected DDR
+		 * (silent SoC reset). Use V7S format to match the hardware.
+		 * The (non-secure) GPU instance keeps LPAE, which is validated
+		 * on-device there.
+		 */
 		pgtbl_cfg = (struct io_pgtable_cfg) {
-			.pgsize_bitmap	= domain->pgsize_bitmap,
+			.pgsize_bitmap	= use_v7s ?
+				(SZ_4K | SZ_64K | SZ_1M | SZ_16M) :
+				domain->pgsize_bitmap,
 			.ias		= 32,
-			.oas		= 40,
+			.oas		= use_v7s ? 32 : 40,
 			.tlb		= &qcom_flush_ops,
 			.iommu_dev	= qcom_iommu->dev,
 		};
@@ -451,8 +465,8 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		qcom_domain->iommu = qcom_iommu;
 		qcom_domain->fwspec = fwspec;
 
-		pgtbl_ops = alloc_io_pgtable_ops(ARM_32_LPAE_S1, &pgtbl_cfg,
-						 qcom_domain);
+		pgtbl_ops = alloc_io_pgtable_ops(use_v7s ? ARM_V7S : ARM_32_LPAE_S1,
+						 &pgtbl_cfg, qcom_domain);
 		if (!pgtbl_ops) {
 			dev_err(qcom_iommu->dev,
 				"failed to allocate pagetable ops\n");
@@ -462,6 +476,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		domain->geometry.aperture_end = (1ULL << pgtbl_cfg.ias) - 1;
 		domain->geometry.force_aperture = true;
+		domain->pgsize_bitmap = pgtbl_cfg.pgsize_bitmap;
 
 		/*
 		 * Publish the page-table ops under init_mutex and before any
@@ -534,9 +549,19 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		iommu_writel(ctx, ARM_SMMU_CB_FSR, ARM_SMMU_CB_FSR_FAULT);
 
 		/* TTBRs */
-		iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
-				pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
-				FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
+		if (use_v7s) {
+			/*
+			 * Short-descriptor: 32-bit TTBR0, ASID lives in
+			 * CONTEXTIDR (vendor: msm_iommu_assign_ASID()).
+			 */
+			iommu_writel(ctx, ARM_SMMU_CB_TTBR0,
+				     pgtbl_cfg.arm_v7s_cfg.ttbr);
+			iommu_writel(ctx, ARM_SMMU_CB_CONTEXTIDR, ctx->asid);
+		} else {
+			iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
+					pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
+					FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
+		}
 		iommu_writeq(ctx, ARM_SMMU_CB_TTBR1, 0);
 
 		/*
@@ -550,14 +575,25 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			iommu_writel(ctx, ARM_SMMU_CB_TCR2,
 					arm_smmu_lpae_tcr2(&pgtbl_cfg));
 		}
-		iommu_writel(ctx, ARM_SMMU_CB_TCR,
-			     arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE);
+		if (use_v7s) {
+			/* TTBCR=0: short-descriptor, no EAE (vendor parity). */
+			iommu_writel(ctx, ARM_SMMU_CB_TCR,
+				     pgtbl_cfg.arm_v7s_cfg.tcr);
+			/* MAIR0/MAIR1 are PRRR/NMRR in short-descriptor mode. */
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
+					pgtbl_cfg.arm_v7s_cfg.prrr);
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
+					pgtbl_cfg.arm_v7s_cfg.nmrr);
+		} else {
+			iommu_writel(ctx, ARM_SMMU_CB_TCR,
+				     arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE);
 
-		/* MAIRs (stage-1 only) */
-		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
-				pgtbl_cfg.arm_lpae_s1_cfg.mair);
-		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
-				pgtbl_cfg.arm_lpae_s1_cfg.mair >> 32);
+			/* MAIRs (stage-1 only) */
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
+					pgtbl_cfg.arm_lpae_s1_cfg.mair);
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
+					pgtbl_cfg.arm_lpae_s1_cfg.mair >> 32);
+		}
 
 		/* SCTLR */
 		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
