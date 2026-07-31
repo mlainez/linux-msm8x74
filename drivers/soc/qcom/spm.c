@@ -380,7 +380,22 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 		return ret ? : drv->set_vdd_ret;
 	}
 
+	/*
+	 * Run the L2/APCS gang-rail write (RST kick -> VCTL -> PMIC_STS poll)
+	 * with preemption disabled.  This rail has no associated CPU
+	 * (reg_cpu < 0) so set_vdd() executes in the caller's context on an
+	 * arbitrary CPU; if that CPU is scheduled away - or, worse, enters
+	 * cpuidle and runs its own per-core SPM power-collapse sequence -
+	 * between the RST and the completion of the PMIC handshake, the SAW
+	 * state machine on the shared rail is left mid-operation and the SoC
+	 * silently resets (PS_HOLD).  The vendor wraps the identical write in
+	 * get_cpu()/put_cpu() for exactly this reason; preemption-off is the one
+	 * context it guarantees that this driver lacked.  IRQs are deliberately
+	 * left enabled - the vendor's apcs-master path does not disable them.
+	 */
+	preempt_disable();
 	drv->reg_data->set_vdd(drv);
+	preempt_enable();
 
 	/*
 	 * Propagate a failed rail write.  Without this the OPP core sees
