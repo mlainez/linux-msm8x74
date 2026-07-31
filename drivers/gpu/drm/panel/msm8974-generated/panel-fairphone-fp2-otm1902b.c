@@ -61,6 +61,15 @@ static int otm1902b_on(struct otm1902b *ctx)
 	mipi_dsi_usleep_range(&dsi_ctx, 1000, 2000);
 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 50);
+	/*
+	 * Command-mode panel: TE must be enabled explicitly. The vendor's
+	 * on-command blob does not carry DCS 0x35 -- the downstream mdss
+	 * framework injects it (qcom,mdss-dsi-te-dcs-command = <1> in
+	 * dsi-panel-otm1902b-1080p-cmd.dtsi), which is why the generated
+	 * sequence lost it. Without TE the MDP5 ping-pong never completes
+	 * ("pp done time out") and the panel stays black.
+	 */
+	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 96);
 

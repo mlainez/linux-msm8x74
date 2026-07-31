@@ -163,6 +163,10 @@ static int s6d6fa1_on(struct s6d6fa1 *ctx)
 	mipi_dsi_usleep_range(&dsi_ctx, 1000, 2000);
 	mipi_dsi_dcs_exit_sleep_mode_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 120);
+	/* Command-mode panel: enable TE (see panel-fairphone-fp2-otm1902b.c;
+	 * downstream injects DCS 0x35 from the mdss framework, so the
+	 * generated sequence lacks it). Untested: no S6D6FA1 unit on hand. */
+	mipi_dsi_dcs_set_tear_on_multi(&dsi_ctx, MIPI_DSI_DCS_TEAR_MODE_VBLANK);
 	mipi_dsi_dcs_set_display_on_multi(&dsi_ctx);
 	mipi_dsi_msleep(&dsi_ctx, 40);
 
