@@ -47,12 +47,7 @@
 			clocks = <&kraitcc 0>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			/*
-			 * D2 isovoltage: CX corner pinned via required-opps; the
-			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
-			 * - that is D3. OPP table is capped at the 960 MHz boot
-			 * frequency so every rate stays inside the boot voltage.
-			 */
+			cpu-supply = <&saw_l2_vreg>;
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
@@ -69,12 +64,7 @@
 			clocks = <&kraitcc 1>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			/*
-			 * D2 isovoltage: CX corner pinned via required-opps; the
-			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
-			 * - that is D3. OPP table is capped at the 960 MHz boot
-			 * frequency so every rate stays inside the boot voltage.
-			 */
+			cpu-supply = <&saw_l2_vreg>;
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
@@ -91,12 +81,7 @@
 			clocks = <&kraitcc 2>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			/*
-			 * D2 isovoltage: CX corner pinned via required-opps; the
-			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
-			 * - that is D3. OPP table is capped at the 960 MHz boot
-			 * frequency so every rate stays inside the boot voltage.
-			 */
+			cpu-supply = <&saw_l2_vreg>;
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
@@ -113,12 +98,7 @@
 			clocks = <&kraitcc 3>;
 			clock-names = "cpu";
 			operating-points-v2 = <&cpu_opp_table>;
-			/*
-			 * D2 isovoltage: CX corner pinned via required-opps; the
-			 * Krait APC rail (SAW2) is NOT driven here (no cpu-supply)
-			 * - that is D3. OPP table is capped at the 960 MHz boot
-			 * frequency so every rate stays inside the boot voltage.
-			 */
+			cpu-supply = <&saw_l2_vreg>;
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
@@ -425,6 +405,16 @@
 		saw_l2: power-manager@f9012000 {
 			compatible = "qcom,msm8974-saw2-v2.1-l2", "qcom,saw2";
 			reg = <0xf9012000 0x1000>;
+
+			/*
+			 * D3: the L2 SAW2 drives the shared Krait gang rail. The spm
+			 * driver registers this child as a regulator; the CPU OPPs
+			 * reference it via cpu-supply so opp-microvolt scales the rail.
+			 */
+			saw_l2_vreg: regulator {
+				regulator-min-microvolt = <350000>;
+				regulator-max-microvolt = <1275000>;
+			};
 		};
 
 		hfpll_l2: clock@f9016000 {
@@ -2544,43 +2534,333 @@
 	cpu_opp_table: opp-table-cpu {
 		compatible = "operating-points-v2-krait-cpu";
 		nvmem-cells = <&speedbin_efuse>;
+		nvmem-cell-names = "speedbin";
 		opp-shared;
 
 		/*
-		 * D2 (CP3 isovoltage): frequencies capped at the 960 MHz boot
-		 * rate so the fixed boot voltage covers the whole sweep. No
-		 * opp-microvolt (no CPU-rail regulator yet); CX pinned
-		 * super_turbo. D3 adds the SAW2 gang rail + higher OPPs.
+		 * D3 (CP4): the Krait APC/L2 gang rail is now driven by the L2
+		 * SAW2 (cpu-supply = <&saw_l2_vreg>), so every OPP carries its
+		 * per-speedbin opp-microvolt (triplet <min target max>, max
+		 * 1275000). Frequencies stay capped at the 960 MHz boot rate -
+		 * one variable vs D2: add voltage, not the higher OPPs. CX
+		 * corner stays pinned super_turbo via required-opps.
 		 */
 		opp-300000000 {
 			opp-hz = /bits/ 64 <300000000>;
 			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
+			opp-microvolt = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs0-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed1-pvs1-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed1-pvs2-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs3-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs4-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs5-v0 = <725000 725000 1275000>;
+			opp-microvolt-speed1-pvs6-v0 = <725000 725000 1275000>;
+			opp-microvolt-speed3-pvs0-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs1-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs2-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs3-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs5-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs6-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs0-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs1-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs2-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs3-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs4-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs6-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs7-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs8-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs9-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs10-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs11-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs12-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs13-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs14-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs15-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs0-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs1-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs2-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs3-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs4-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs6-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs7-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs8-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs9-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs10-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs11-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs12-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs13-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs14-v1 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs15-v1 = <750000 750000 1275000>;
 		};
+
 		opp-422400000 {
 			opp-hz = /bits/ 64 <422400000>;
 			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
+			opp-microvolt = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs0-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed1-pvs1-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed1-pvs2-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs3-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs4-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs5-v0 = <725000 725000 1275000>;
+			opp-microvolt-speed1-pvs6-v0 = <725000 725000 1275000>;
+			opp-microvolt-speed3-pvs0-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs1-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs2-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs3-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs5-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs6-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs0-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs1-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs2-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs3-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs4-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs6-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs7-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs8-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs9-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs10-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs11-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs12-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs13-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs14-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs15-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs0-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs1-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs2-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs3-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs4-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs6-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs7-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs8-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs9-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs10-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs11-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs12-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs13-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs14-v1 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs15-v1 = <750000 750000 1275000>;
 		};
+
 		opp-652800000 {
 			opp-hz = /bits/ 64 <652800000>;
 			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
+			opp-microvolt = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs0-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs1-v0 = <785000 785000 1275000>;
+			opp-microvolt-speed1-pvs2-v0 = <770000 770000 1275000>;
+			opp-microvolt-speed1-pvs3-v0 = <755000 755000 1275000>;
+			opp-microvolt-speed1-pvs4-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs5-v0 = <735000 735000 1275000>;
+			opp-microvolt-speed1-pvs6-v0 = <725000 725000 1275000>;
+			opp-microvolt-speed3-pvs0-v0 = <810000 810000 1275000>;
+			opp-microvolt-speed3-pvs1-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs2-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs3-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs5-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs6-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs0-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs1-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs2-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs3-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs4-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs6-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs7-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs8-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs9-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs10-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs11-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs12-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs13-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs14-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs15-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs0-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed3-pvs1-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed3-pvs2-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed3-pvs3-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs4-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs6-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs7-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs8-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs9-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs10-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs11-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs12-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs13-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs14-v1 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs15-v1 = <750000 750000 1275000>;
 		};
+
 		opp-729600000 {
 			opp-hz = /bits/ 64 <729600000>;
 			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
+			opp-microvolt = <860000 860000 1275000>;
+			opp-microvolt-speed1-pvs0-v0 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs1-v0 = <795000 795000 1275000>;
+			opp-microvolt-speed1-pvs2-v0 = <780000 780000 1275000>;
+			opp-microvolt-speed1-pvs3-v0 = <765000 765000 1275000>;
+			opp-microvolt-speed1-pvs4-v0 = <755000 755000 1275000>;
+			opp-microvolt-speed1-pvs5-v0 = <745000 745000 1275000>;
+			opp-microvolt-speed1-pvs6-v0 = <735000 735000 1275000>;
+			opp-microvolt-speed3-pvs0-v0 = <820000 820000 1275000>;
+			opp-microvolt-speed3-pvs1-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs2-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs3-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs5-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs6-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs0-v1 = <860000 860000 1275000>;
+			opp-microvolt-speed1-pvs1-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs2-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs3-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs4-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs5-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs6-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs7-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs8-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs9-v1 = <805000 805000 1275000>;
+			opp-microvolt-speed1-pvs10-v1 = <805000 805000 1275000>;
+			opp-microvolt-speed1-pvs11-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs12-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs13-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs14-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs15-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs0-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed3-pvs1-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed3-pvs2-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed3-pvs3-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed3-pvs4-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs5-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs6-v1 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs7-v1 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs8-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs9-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs10-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs11-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs12-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs13-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs14-v1 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs15-v1 = <750000 750000 1275000>;
 		};
+
 		opp-883200000 {
 			opp-hz = /bits/ 64 <883200000>;
 			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
+			opp-microvolt = <880000 880000 1275000>;
+			opp-microvolt-speed1-pvs0-v0 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs1-v0 = <815000 815000 1275000>;
+			opp-microvolt-speed1-pvs2-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed1-pvs3-v0 = <785000 785000 1275000>;
+			opp-microvolt-speed1-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed1-pvs5-v0 = <765000 765000 1275000>;
+			opp-microvolt-speed1-pvs6-v0 = <755000 755000 1275000>;
+			opp-microvolt-speed3-pvs0-v0 = <840000 840000 1275000>;
+			opp-microvolt-speed3-pvs1-v0 = <815000 815000 1275000>;
+			opp-microvolt-speed3-pvs2-v0 = <790000 790000 1275000>;
+			opp-microvolt-speed3-pvs3-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs5-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs6-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs0-v1 = <880000 880000 1275000>;
+			opp-microvolt-speed1-pvs1-v1 = <870000 870000 1275000>;
+			opp-microvolt-speed1-pvs2-v1 = <860000 860000 1275000>;
+			opp-microvolt-speed1-pvs3-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs4-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs5-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs6-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs7-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs8-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs9-v1 = <825000 825000 1275000>;
+			opp-microvolt-speed1-pvs10-v1 = <825000 825000 1275000>;
+			opp-microvolt-speed1-pvs11-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs12-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs13-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs14-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs15-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs0-v1 = <860000 860000 1275000>;
+			opp-microvolt-speed3-pvs1-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed3-pvs2-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed3-pvs3-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed3-pvs4-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed3-pvs5-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed3-pvs6-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs7-v1 = <795000 795000 1275000>;
+			opp-microvolt-speed3-pvs8-v1 = <785000 785000 1275000>;
+			opp-microvolt-speed3-pvs9-v1 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs10-v1 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs11-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs12-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs13-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs14-v1 = <755000 755000 1275000>;
+			opp-microvolt-speed3-pvs15-v1 = <755000 755000 1275000>;
 		};
+
 		opp-960000000 {
 			opp-hz = /bits/ 64 <960000000>;
 			required-opps = <&rpmpd_opp_super_turbo>;
 			opp-supported-hw = <0xf>;
+			opp-microvolt = <890000 890000 1275000>;
+			opp-microvolt-speed1-pvs0-v0 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs1-v0 = <825000 825000 1275000>;
+			opp-microvolt-speed1-pvs2-v0 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs3-v0 = <795000 795000 1275000>;
+			opp-microvolt-speed1-pvs4-v0 = <785000 785000 1275000>;
+			opp-microvolt-speed1-pvs5-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed1-pvs6-v0 = <765000 765000 1275000>;
+			opp-microvolt-speed3-pvs0-v0 = <850000 850000 1275000>;
+			opp-microvolt-speed3-pvs1-v0 = <825000 825000 1275000>;
+			opp-microvolt-speed3-pvs2-v0 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs3-v0 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs4-v0 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs5-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed3-pvs6-v0 = <750000 750000 1275000>;
+			opp-microvolt-speed1-pvs0-v1 = <890000 890000 1275000>;
+			opp-microvolt-speed1-pvs1-v1 = <880000 880000 1275000>;
+			opp-microvolt-speed1-pvs2-v1 = <870000 870000 1275000>;
+			opp-microvolt-speed1-pvs3-v1 = <860000 860000 1275000>;
+			opp-microvolt-speed1-pvs4-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs5-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs6-v1 = <860000 860000 1275000>;
+			opp-microvolt-speed1-pvs7-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed1-pvs8-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed1-pvs9-v1 = <835000 835000 1275000>;
+			opp-microvolt-speed1-pvs10-v1 = <835000 835000 1275000>;
+			opp-microvolt-speed1-pvs11-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed1-pvs12-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs13-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed1-pvs14-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed1-pvs15-v1 = <800000 800000 1275000>;
+			opp-microvolt-speed3-pvs0-v1 = <870000 870000 1275000>;
+			opp-microvolt-speed3-pvs1-v1 = <860000 860000 1275000>;
+			opp-microvolt-speed3-pvs2-v1 = <850000 850000 1275000>;
+			opp-microvolt-speed3-pvs3-v1 = <840000 840000 1275000>;
+			opp-microvolt-speed3-pvs4-v1 = <830000 830000 1275000>;
+			opp-microvolt-speed3-pvs5-v1 = <820000 820000 1275000>;
+			opp-microvolt-speed3-pvs6-v1 = <810000 810000 1275000>;
+			opp-microvolt-speed3-pvs7-v1 = <805000 805000 1275000>;
+			opp-microvolt-speed3-pvs8-v1 = <795000 795000 1275000>;
+			opp-microvolt-speed3-pvs9-v1 = <790000 790000 1275000>;
+			opp-microvolt-speed3-pvs10-v1 = <785000 785000 1275000>;
+			opp-microvolt-speed3-pvs11-v1 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs12-v1 = <780000 780000 1275000>;
+			opp-microvolt-speed3-pvs13-v1 = <775000 775000 1275000>;
+			opp-microvolt-speed3-pvs14-v1 = <765000 765000 1275000>;
+			opp-microvolt-speed3-pvs15-v1 = <760000 760000 1275000>;
 		};
 	};
 
