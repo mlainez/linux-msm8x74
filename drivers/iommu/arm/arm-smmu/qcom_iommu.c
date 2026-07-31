@@ -123,6 +123,16 @@ struct qcom_iommu_dev {
 	 */
 	bool			 nonsecure;
 	bool			 glb_inited;
+	/*
+	 * MSM8974 QSMMU-v2 IP quirks, keyed on the "qcom,msm8974-iommu"
+	 * compatible: no CB TCR2 register (CB+0x10 faults the SoC), AF
+	 * faulting needs the vendor SCTLR.AFFD bit, and the SMMU window has
+	 * no 8916-style wrapper page (base+0x2000 is MICRO_MMU_CTRL, so the
+	 * SMMU_INTR_SEL_NS write must never happen). These are properties of
+	 * the IP, not of the secure/non-secure split: the TZ-managed MDP
+	 * SMMU needs them exactly as much as the non-secure GPU one.
+	 */
+	bool			 is_msm8974;
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -481,7 +491,18 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
-		if (!ctx->secure_init && qcom_iommu_has_secure_context(qcom_iommu)) {
+		/*
+		 * TZ owns the stream mapping whenever the instance has a
+		 * qcom,iommu-secure-id -- regardless of whether any child
+		 * context bank is itself secure. Gating this on
+		 * has_secure_context() (i.e. on a "-sec" child existing)
+		 * silently skips the restore_sec_cfg() that installs
+		 * SMR/S2CR/CBAR for our -ns bank, leaving the stream
+		 * unmapped: traffic then bypasses translation and hits DDR
+		 * with raw physical addresses (msm8974 MDP: secure-id 1,
+		 * single -ns bank, is exactly this shape).
+		 */
+		if (!ctx->secure_init && !qcom_iommu->nonsecure) {
 			ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, ctx->asid);
 			if (ret) {
 				dev_err(qcom_iommu->dev, "secure init failed: %d\n", ret);
@@ -519,11 +540,11 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		/*
 		 * TCR2 (CB offset 0x10) does not exist on the MSM8974 QSMMU-v2
 		 * context bank -- the downstream msm-iommu-v1 driver never writes
-		 * it, and writing it here faults and resets the SoC. Skip it on
-		 * the non-secure (msm8974) path; the PA-size/SEP it would carry is
-		 * conveyed by TCR on this IP.
+		 * it, and writing it here faults and resets the SoC. This is an
+		 * IP property, not a security-model one: the TZ-managed MDP
+		 * instance has the same CB layout as the non-secure GPU one.
 		 */
-		if (!qcom_iommu->nonsecure) {
+		if (!qcom_iommu->is_msm8974) {
 			iommu_writel(ctx, ARM_SMMU_CB_TCR2,
 					arm_smmu_lpae_tcr2(&pgtbl_cfg));
 		}
@@ -547,11 +568,12 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		 * the first stage-1 walk even with SCTLR.AFE cleared -- unlike
 		 * the ARM SMMU architectural behaviour, clearing AFE alone does
 		 * not disable AF faulting on this IP. Set the Qualcomm-specific
-		 * AFFD (Access-Flag-Fault-Disable) bit instead. The secure path
-		 * (msm8916 etc.) keeps the architectural AFE and does not touch
-		 * the vendor AFFD bit.
+		 * AFFD (Access-Flag-Fault-Disable) bit instead. Other SoCs
+		 * (msm8916 etc.) keep the architectural AFE and do not touch
+		 * the vendor AFFD bit. Like TCR2 above this is an IP quirk,
+		 * shared by the secure MDP instance.
 		 */
-		if (qcom_iommu->nonsecure)
+		if (qcom_iommu->is_msm8974)
 			reg |= ARM_SMMU_SCTLR_AFFD;
 		else
 			reg |= ARM_SMMU_SCTLR_AFE;
@@ -1156,6 +1178,9 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		qcom_iommu->nonsecure = true;
 	}
 
+	qcom_iommu->is_msm8974 = of_device_is_compatible(dev->of_node,
+							 "qcom,msm8974-iommu");
+
 	if (qcom_iommu_has_secure_context(qcom_iommu)) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
 		if (ret) {
@@ -1167,6 +1192,17 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	platform_set_drvdata(pdev, qcom_iommu);
 
 	pm_runtime_enable(dev);
+
+	/*
+	 * A TZ-managed instance behind a power domain (msm8974 MDP SMMU on
+	 * MDSS_GDSC) loses its context-bank registers on power collapse, and
+	 * the resume path only re-runs restore_sec_cfg() -- the TZ/global
+	 * half. Until a per-CB reprogram-on-resume exists, keep the instance
+	 * from runtime-suspending at all. The practical cost is nil for a
+	 * display that scans out continuously (fbcon).
+	 */
+	if (!qcom_iommu->nonsecure && dev->pm_domain)
+		pm_runtime_forbid(dev);
 
 	/* register context bank devices, which are child nodes: */
 	ret = devm_of_platform_populate(dev);
@@ -1188,7 +1224,14 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		goto err_pm_disable;
 	}
 
-	if (qcom_iommu->local_base && qcom_iommu_has_secure_context(qcom_iommu)) {
+	/*
+	 * SMMU_INTR_SEL_NS lives in the 8916-style wrapper window; the
+	 * msm8974 SMMU has no such window and base+0x2000 is MICRO_MMU_CTRL
+	 * -- writing 0xffffffff there asserts HALT_REQ with garbage config
+	 * and wedges the MMSS bus (empirically: boot loop). Never on 8974.
+	 */
+	if (qcom_iommu->local_base && !qcom_iommu->is_msm8974 &&
+	    !qcom_iommu->nonsecure) {
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
 			goto err_pm_disable;
@@ -1302,7 +1345,7 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	if (ret < 0)
 		goto err_icc;
 
-	if (dev->pm_domain && qcom_iommu_has_secure_context(qcom_iommu)) {
+	if (dev->pm_domain && !qcom_iommu->nonsecure) {
 		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
 		if (ret)
 			goto err_clk;
