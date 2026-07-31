@@ -290,6 +290,25 @@ branch or drop, before CP3.
 
 ---
 
+### SES2-B — infrastructure + findings (2026-07-31)
+- **stable-sync workflow extended** to also merge `linux-6.18.y` into
+  `6.18/baseline` (commit `dc3e699a0109` on `6.18/staging`, the default branch
+  the scheduled workflow runs from; push operator-approved). Baseline stays
+  security-current with no other topics.
+- **Display root cause (operator question):** the black screen on display-DTB
+  6.18 kernels is NOT config — the built kernel has the full pipeline
+  (`DRM_MSM/MDP5/DSI/28NM_PHY/fbcon` all =y). The FP2 **panel node and its
+  `fairphone,fp2-panel` driver are out-of-tree patches in msm8974-mainline**
+  (verified present in `qcom-msm8974-6.15.y` of `~/Projects/linux-msm8974-upstream`,
+  absent from upstream v6.18.41 AND from every fp2.dts in this fork) — the
+  6.16-era deb kernels descended from that lineage; the 6.18 fork never ported
+  the display topic. Fix = port as `6.18/topic/fp2-panel` (DT node + panel
+  driver chain per the porting rules), soak as its own rung.
+- **reboot-mode RESOLVED (operator-confirmed):** `reboot-mode bootloader` does
+  enter fastboot; usage is fire-and-forget (the command blocks the SSH pipe —
+  issue with a timeout, then poll `fastboot devices`). SES1-F's FAIL was a
+  false negative from the blocking pipe + poll interaction.
+
 ## Current state (updated 2026-07-31, release-baseline soak running)
 
 - **Checkpoint:** SES2-A release soak RUNNING on `6.18/baseline`
