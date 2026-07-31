@@ -697,3 +697,42 @@ a ramp/settle or a lock the vendor holds; (b) does mainline msm8974 even drive
 APC voltage, or is the SAW2 gang-rail a downstream invention that should be
 replaced by a static safe rail (D2 was transition-stable); (c) the excluded
 margin commit a0386dc2a86e.
+
+## D3v2 (2026-07-31) — dynamic phase/FTS implemented; the #1 specced fix FAILS
+
+Implemented DVFS-TRANSITION-FIX-SPEC §5 on 6.12 `spm.c` (topic spm-gangrail
+`f817aefc187b`, int/d3 `6dc1953a9245`): every voltage change now also writes
+SMPS phase count (VCTL port 1) + FTS PFM/PWM (VCTL port 2) matched to the
+operating point, polling PMIC FSM-idle (PMIC_STS[17:16]==0, register-verified
+vs vendor spm-v2.c). Built clean, flashed, rail still tracks freq (800→835 mV).
+
+**Result: still resets under the idle transition-storm, fast.**
+- 300↔960 idle-storm: reset ~30 s (≈ D3's 37 s).
+- **729.6↔960 idle-storm (spec's "safe" narrow/high window): reset ~13 s.**
+
+Hard conclusions:
+1. The fork's **top-ranked fix (dynamic phase/FTS) does not stop the reset** on
+   6.12. Open sub-question: does §5 silently no-op via an FSM-poll timeout, or
+   genuinely not help? No runtime observability yet — a debug-counter build
+   would tell.
+2. **6.12 is at least as bad as the 6.18 spec, probably worse:** the spec found
+   729.6↔960 / small-ΔV windows survive 400–600k flips; on 6.12 even 729.6↔960
+   dies in ~13 s. The per-transition fault fires on essentially *any* DVFS
+   transition here.
+
+Implication: **the whole goal (safe DVFS + thermal — and thermal throttling
+needs freq scaling, so it inherits this) is blocked by one unsolved
+per-transition PS_HOLD fault** the fork already spent a spec + WIP mitigations
+on and PARKED. Fixed-frequency (no VCTL writes) is stable for hours; free DVFS
+is not.
+
+Remaining untried angles (all uncertain, each a build/flash cycle):
+- spec §6 fallback: arm the L2 SPM sequencer vendor-way (saw2-spm-ctl=0x1) — but
+  the fork already tried arming and it "made it worse" (spec §4.2).
+- observability build (count phase/FTS writes + FSM-poll failures) to learn
+  whether §5 no-ops before abandoning it.
+- bisect the 6.12-vs-6.18 delta that makes 6.12's narrow window die where
+  6.18's survived.
+- full coeff+load phase policy (spec §5.2 option B) vs voltage-only.
+
+Device parked on `powersave` (fixed 300 MHz, transition-quiet, stable).
