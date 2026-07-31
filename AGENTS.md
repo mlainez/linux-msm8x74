@@ -188,6 +188,30 @@ when work from this fork is submitted **upstream**:
 
 ---
 
+## 3.1 Debugging walls: the authority order (hard rule)
+
+When a hardware-facing symptom survives **two fix attempts** (or an hour
+without a mechanism), stop reading the tree you are porting *to* — it is the
+one source known not to contain the answer — and walk the authority order in
+`docs/porting/BLUEPRINT-kernel-feature-bringup.md` §6.1:
+
+1. **vendor/downstream source** (register-level truth: how does the working
+   driver program this exact block?);
+2. **live oracle over adb** (the working stack's runtime state — keep the
+   Android phone connected for the whole campaign);
+3. **sibling ports** (msm8974-mainline, pmaports devices);
+4. **this fork's own history** (branches, reverts, abandoned attempts);
+5. **upstream history** between the last-working and current base.
+
+Parallelize the reading (one subagent per authority) rather than serially
+poking the device. Device experiments decide between authority-produced
+hypotheses; they do not replace the reading. Paid-for examples: the panel TE
+command injected by the downstream *framework* (in no command blob), and the
+V7S-vs-LPAE SMMU page-table format — both answered in minutes by authority 1
+after hours of mainline-side theorizing.
+
+---
+
 ## 4. Build & test (quick reference)
 
 - Topics/integration are built and flashed via the buildroot at

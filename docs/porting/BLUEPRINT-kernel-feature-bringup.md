@@ -210,6 +210,58 @@ suspect, observing that the symptom moved, and concluding causation.
 reproducible *on demand* before the fix, or if the post-fix soak exceeds the §7 duration
 for the mode being claimed.
 
+### 6.1 The wall protocol — escalation for *interactive* debugging
+
+The council (P8) triggers on formal soak verdicts, but most time is lost at a
+different kind of wall: interactive bring-up where a symptom survives fix
+attempts. That wall has its own protocol, and it fires on **symptom
+persistence, not on verdicts**:
+
+> **Trigger: the same symptom has survived two fix attempts, or one debugging
+> hour has produced no mechanism. Stop touching the DUT and run the checklist.**
+
+1. **Say out loud which tree you have been reading.** If the answer is "the
+   tree I am porting *to*", you have been consulting the one source that is
+   known not to contain the answer — if it did, the port would work.
+2. **Walk the authority order, in order, and record what each says:**
+   1. the **vendor/downstream source** — how does the working driver program
+      this exact block? (registers, formats, init order, magic values);
+   2. the **live oracle** — what is the working stack's *runtime* state for
+      this subsystem (debugfs, sysfs, /proc, interrupts, clocks, regulators)?
+   3. **sibling ports** — did another device/SoC-family port solve this, and
+      how?
+   4. **this fork's own history** — grep branches, reverted commits and
+      abandoned attempts; someone may have hit and documented this exact wall;
+   5. **upstream history** — `git log` the subsystem between the last-working
+      and current base; behaviour that "worked on N-2" may be an upstream
+      regression or removal.
+3. **Diff the working implementation against yours at register level.** Every
+   divergence is a ranked hypothesis; the highest rank goes to divergences in
+   *format, order or ownership* (who programs what), not in values.
+4. **Parallelize the reading.** When more than one authority might hold the
+   answer, dispatch independent analyses concurrently (subagents, one lens per
+   authority) instead of serially poking the device between theories. A
+   completeness critic closes the loop: *"which authority have we not
+   consulted yet?"*
+5. **Only then instrument the DUT.** Device-side experiments are for deciding
+   between hypotheses the authorities produced — not for generating hypotheses
+   from scratch.
+
+Case studies from the FP2 campaign (why every step above exists — each cost
+real hours to learn):
+- a command-mode panel stayed black because the vendor's `set_tear_on` is
+  injected by the downstream *framework* from a DT property, so it appears in
+  no panel command blob and no generated driver (authority 1 held the answer;
+  hours went to mainline theories first);
+- scanout "worked" fault-free into a black screen because the vendor programs
+  every SMMU on the platform with **V7S short-descriptor** tables while the
+  ported driver used LPAE — a 30-line read of the vendor's
+  `__program_context()` (authority 1) that was postponed behind three
+  mainline-side theories;
+- an "already solved" hazard (the fatal SMMU+0x2000 write) was documented in
+  the fork's own abandoned branch (authority 4) before it was rediscovered
+  the hard way.
+
 ---
 
 ## 7. How long to soak (do the arithmetic, don't guess)
@@ -244,6 +296,13 @@ Consequences to accept up front:
 - Building test images from a **branch ref** (caches serve stale trees) rather than a SHA.
 - Reasoning from a *different unit's* per-die values.
 - Reporting a mechanism as established when only its plausibility was established.
+- **Debugging the port against the port's own source tree** while a working
+  implementation (vendor source, live oracle, sibling port) sits unconsulted —
+  the tree being ported *to* is the one source known not to contain the answer.
+- Testing a hardware-behaviour hypothesis on the DUT before reading how the
+  downstream driver programs the same block (§6.1 authority order).
+- Serial trial-and-error on the device when independent authorities could be
+  read in parallel (spawn one analysis per authority; then decide).
 
 ---
 

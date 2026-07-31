@@ -86,6 +86,14 @@ Clone what you will grep repeatedly; record the commit you read.
 | Mailing lists (lore.kernel.org, the SoC's list) | Patches in flight, maintainer objections, why something was rejected | High, but check status |
 | Wikis, forums, XDA | Leads, device quirks, key combos | Low — verify before acting |
 
+The corpus is not only for the initial recon: it is the **first stop whenever
+the port misbehaves**. The escalation checklist and authority order (vendor
+source → live oracle → sibling ports → this fork's own history → upstream
+history) live in `BLUEPRINT-kernel-feature-bringup.md` §6.1 — apply it on
+symptom persistence, not only on formal soak failures. The recurring trap it
+exists to break: debugging by reading the tree being ported *to*, which is the
+one source known not to contain the answer.
+
 Two rules that have already cost time here:
 
 - **Clone with `--filter=blob:none`, not `--depth=1`, for any tree where you may need
@@ -173,6 +181,16 @@ Its value is that **it works**. It is a measuring instrument, not a build target
 - **Per-die caveat:** the oracle is usually a *different unit* from the DUT. It yields the
   **model-level facts, algorithms, tables and policy**; fuse bins, calibration values and
   aging behaviour must be read on the DUT.
+- **The oracle is a standing instrument, not a one-time profile source.** It is
+  consulted at P0 for the target profile — and then again *every time the DUT
+  does something the working stack does not*. Mid-debug it can answer, live and
+  in minutes: the working runtime state of any subsystem (debugfs — regulators,
+  clocks, IOMMU, RPM; sysfs; `/proc/interrupts`; loaded config), the vendor's
+  actual init/teardown ordering (via its logs), and "does the working stack even
+  use this mechanism?". **Before writing any debug instrumentation for the DUT,
+  check whether the oracle already exposes the answer.** Keep it plugged in for
+  the whole campaign; an unplugged oracle silently degrades every debugging
+  session that follows.
 
 ### 3.2 DUT — the device running the kernel under development
 
@@ -429,6 +447,13 @@ investigating is the most common irreversible mistake.
 8. Changing more than one variable between two runs.
 9. Carrying **die-scoped** values from the oracle to the DUT.
 10. Repeating a borrowed fact without its source, file and commit.
+11. Testing a hardware-behaviour hypothesis on the DUT before checking how the
+    downstream driver programs the same block, and before checking whether the
+    live oracle can answer the question directly (blueprint §6.1).
+12. Serial trial-and-error against the DUT while an unconsulted authority
+    (vendor source, oracle, sibling port, fork history, upstream log) could
+    decide the question — parallelize the reading instead (one subagent per
+    authority where the tooling allows it).
 
 ---
 
