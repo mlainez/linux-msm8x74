@@ -2391,6 +2391,11 @@
 					hysteresis = <2000>;
 					type = "passive";
 				};
+				cpu_hot0: trip2 {
+					temperature = <88000>;
+					hysteresis = <4000>;
+					type = "passive";
+				};
 				cpu_crit0: trip1 {
 					temperature = <110000>;
 					hysteresis = <2000>;
@@ -2399,9 +2404,21 @@
 			};
 
 			cooling-maps {
+				/*
+				 * Staged throttling.  Warm trip: work within the high
+				 * operating points (states 0-7 = 2265.6..1036.8 MHz).
+				 * Hot trip: floor the cap at state 8 (960 MHz) - the
+				 * operating point this board has run for days at 90 C
+				 * under full load; the fast/lean corners above it are
+				 * not validated at that temperature.
+				 */
 				map0 {
 					trip = <&cpu_alert0>;
-					cooling-device = <&CPU0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU0 0 7>;
+				};
+				map1 {
+					trip = <&cpu_hot0>;
+					cooling-device = <&CPU0 8 THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -2418,6 +2435,11 @@
 					hysteresis = <2000>;
 					type = "passive";
 				};
+				cpu_hot1: trip2 {
+					temperature = <88000>;
+					hysteresis = <4000>;
+					type = "passive";
+				};
 				cpu_crit1: trip1 {
 					temperature = <110000>;
 					hysteresis = <2000>;
@@ -2426,9 +2448,21 @@
 			};
 
 			cooling-maps {
+				/*
+				 * Staged throttling.  Warm trip: work within the high
+				 * operating points (states 0-7 = 2265.6..1036.8 MHz).
+				 * Hot trip: floor the cap at state 8 (960 MHz) - the
+				 * operating point this board has run for days at 90 C
+				 * under full load; the fast/lean corners above it are
+				 * not validated at that temperature.
+				 */
 				map0 {
 					trip = <&cpu_alert1>;
-					cooling-device = <&CPU1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU1 0 7>;
+				};
+				map1 {
+					trip = <&cpu_hot1>;
+					cooling-device = <&CPU1 8 THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -2445,6 +2479,11 @@
 					hysteresis = <2000>;
 					type = "passive";
 				};
+				cpu_hot2: trip2 {
+					temperature = <88000>;
+					hysteresis = <4000>;
+					type = "passive";
+				};
 				cpu_crit2: trip1 {
 					temperature = <110000>;
 					hysteresis = <2000>;
@@ -2453,9 +2492,21 @@
 			};
 
 			cooling-maps {
+				/*
+				 * Staged throttling.  Warm trip: work within the high
+				 * operating points (states 0-7 = 2265.6..1036.8 MHz).
+				 * Hot trip: floor the cap at state 8 (960 MHz) - the
+				 * operating point this board has run for days at 90 C
+				 * under full load; the fast/lean corners above it are
+				 * not validated at that temperature.
+				 */
 				map0 {
 					trip = <&cpu_alert2>;
-					cooling-device = <&CPU2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU2 0 7>;
+				};
+				map1 {
+					trip = <&cpu_hot2>;
+					cooling-device = <&CPU2 8 THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -2472,6 +2523,11 @@
 					hysteresis = <2000>;
 					type = "passive";
 				};
+				cpu_hot3: trip2 {
+					temperature = <88000>;
+					hysteresis = <4000>;
+					type = "passive";
+				};
 				cpu_crit3: trip1 {
 					temperature = <110000>;
 					hysteresis = <2000>;
@@ -2480,9 +2536,21 @@
 			};
 
 			cooling-maps {
+				/*
+				 * Staged throttling.  Warm trip: work within the high
+				 * operating points (states 0-7 = 2265.6..1036.8 MHz).
+				 * Hot trip: floor the cap at state 8 (960 MHz) - the
+				 * operating point this board has run for days at 90 C
+				 * under full load; the fast/lean corners above it are
+				 * not validated at that temperature.
+				 */
 				map0 {
 					trip = <&cpu_alert3>;
-					cooling-device = <&CPU3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+					cooling-device = <&CPU3 0 7>;
+				};
+				map1 {
+					trip = <&cpu_hot3>;
+					cooling-device = <&CPU3 8 THERMAL_NO_LIMIT>;
 				};
 			};
 		};
