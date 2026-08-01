@@ -801,3 +801,50 @@ retention-floor IPI. For a shippable stable-DVFS milestone now, disable cpu-spc
 via DT/kernel default; optimize idle power afterward. Persist the cpu-spc
 disable (DT idle-state removal or default-disabled) — the runtime sysfs setting
 is lost on reboot.
+
+# SESSION 4 (2026-08-01) — overnight PASS; full OPP; LOAD-reset root-caused
+
+## Overnight idle-storm soak: PASS (the checkpoint holds)
+- 7.15 h continuous, **82.5M transitions, 0 resets** (boot count stayed 2),
+  preempt-fix + cpu-spc-off. Health green: remoteprocs up, 0 IOMMU faults,
+  network+modem+sensors fine, rail scaling live.
+
+## Build A (full OPP range): validated
+- cpu_opp_table extended to the 14 stock rates (300→2265.6 MHz), per-bin
+  voltages from the fork's 6.18 DT; cpu-spc disable persisted in DT
+  (krait-cpufreq `f89eae2b67e5`). On device: 14 freqs, rail 800→1060 mV
+  monotonic, **630k full-range transitions clean** incl. 300↔2265.6 big-ΔV.
+
+## LOAD reset (the remaining killer): root-caused via Marc's VBAT instrument
+- Build B (thermal DT wired, `83a56b003aca`) reset under pinned 4-core load in
+  30–144 s at *any* freq (960 = 2265.6), PS_HOLD, temps 50–60 °C (not thermal).
+- **VBAT telemetry** (PM8941 VADC ch6 VBAT_SNS raw, calibrated per-sample from
+  the on-die 625/1250 mV refs, ×3 prescale; 35 Hz fsync logger): VBAT **flat at
+  4.19–4.20 V through the moment of death** (min 4.169 V / 2407 samples) ⇒
+  battery/charger path EXONERATED. IADC reads raw=0 (needs work; parked).
+- Discriminator (devmem, no rebuild): force SMPS **PWM (VCTL port2=0x80) +
+  4-phase (port1=3)** once → the identical load ran **~8 min and counting**
+  (67 °C, healthy) vs 30–144 s deaths. **Root cause: the bootloader leaves the
+  gang-rail buck in a light-load config; sustained multi-core current droops
+  the SoC-side rail → silent PS_HOLD while VBAT stays perfect.** Idle storms
+  never drew the current — why every idle test passed.
+- Fix committed: `8ecbddae6e91` "soc: qcom: spm: boot the msm8974 gang-rail
+  SMPS into PWM/4-phase" — static, once at probe, FSM-idle-confirmed, vendor
+  50 µs settles. Per-transition management stays out (A/B-tested 3× worse).
+  Cost: PFM idle efficiency; tracked with the deep-idle coordination item.
+
+## The msm8974 silent reset — complete picture (two mechanisms, both fixed)
+1. **Transition face:** per-core cpu-spc power-collapse racing the gang-rail
+   VCTL write → fix: preempt-off write + cpu-spc off (82.5M transitions clean).
+2. **Load face:** SMPS light-load boot config vs sustained multi-core current
+   → fix: static PWM/4-phase at probe (~8 min live vs 30–144 s; soak pending).
+
+## Build C = `e363f90b9df6` (int/d3): staging + cpu-thermal (full OPP +
+cpu-spc-off + 90/105 °C trips + cooling-maps + CONFIG_CPU_THERMAL=y) +
+spm-gangrail (regulator + preempt + SMPS boot config) + pon-reason.
+Pending: flash → load @960 → load @2265.6 (thermal-throttle engagement =
+D4 validation) → idle-storm regression → merge topics to staging, §1.1 soak.
+
+TODO (Marc's ask): dedicated `battery-telemetry` topic off the no-DVFS
+baseline — formalize the VBAT instrument (VADC built-in, logger tool in
+kernel-tests, and investigate IADC current raw=0).
