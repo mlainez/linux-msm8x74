@@ -848,3 +848,31 @@ D4 validation) → idle-storm regression → merge topics to staging, §1.1 soak
 TODO (Marc's ask): dedicated `battery-telemetry` topic off the no-DVFS
 baseline — formalize the VBAT instrument (VADC built-in, logger tool in
 kernel-tests, and investigate IADC current raw=0).
+
+## D4 staged thermal — VALIDATED (2026-08-01, after Marc's envelope correction)
+
+Marc's field data: this board runs **days at 90 °C / 960 MHz / full load**
+(no-DVFS kernels, bootloader ~1.0 V rail). So temperature alone is not the
+limit — the failure corner is high-freq × high-temp × minimum bin voltage.
+The interim 60 °C-trip attempt was over-conservative and was dropped unbuilt.
+
+**Staged policy** (cpu-thermal `a72c2608c04b`): warm passive trip (FP2: 70 °C,
+hyst 5) throttles within cooling states 0–7 (2265.6→1036.8); hot trip 88 °C
+(hyst 4) floors the cap at state 8 (**≤960 MHz — the days-proven point**);
+critical 105 °C. Result on device (Build E `21cdb7d443ed`): max-effort 4-core
+load bursts to 2265.6, staircases down, and settles at **~79 °C / 1497.6 MHz
+(throttle state 4–5), stable for 20+ min and counting** — vs ~10.5 min to
+reset at ~90 °C/1728–1958 under the flat-90 °C policy. No reset, no critical
+trip. Watch item: DVFS runs 960 at the 835 mV bin value vs the ~1.0 V of the
+multi-day campaign; if the hot floor misbehaves at 835 mV, bump that OPP.
+
+## Staging merge + staging image
+All topics merged into `6.12/staging` = `69762aed3891` (krait-cpufreq,
+spm-gangrail, cpu-thermal, pon-reason, battery-telemetry) and pushed; tree
+identical to the validated int/d3 plus the battery-telemetry VADC one-liner.
+Build F (pinned to the staging SHA) prepared for the §1.1 gate run: flash →
+health sweep → ≥60 min idle soak with a real governor (no pins) → then
+rc promotion is a human decision.
+
+Bench notes: device SSH is password auth (root/root) per Marc — no key dance
+after flashes. Remote pushes unlocked.
