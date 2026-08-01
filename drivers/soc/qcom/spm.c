@@ -7,6 +7,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/init.h>
 #include <linux/io.h>
@@ -45,6 +46,16 @@
 #define SPM_2_1_VCTL_PORT		GENMASK(18, 16)
 #define SPM_2_1_AVS_CTL_AVS_ENABLED	BIT(0)
 #define SPM_2_1_PMIC_STS_CURR_VLVL	GENMASK(7, 0)
+#define SPM_2_1_PMIC_STS_STATE		GENMASK(17, 16)
+
+/*
+ * The gang-rail SAW2 also carries the SMPS phase count (VCTL port 1) and
+ * FTS mode (VCTL port 2); the data byte for port 2 selects PFM (0x00) or
+ * PWM (0x80).
+ */
+#define SPM_SAW_PHASE_PORT		1
+#define SPM_SAW_FTS_PORT		2
+#define SPM_FTS_PWM			0x80
 
 enum spm_reg {
 	SPM_REG_CFG,
@@ -482,6 +493,28 @@ enable_avs:
 
 
 /*
+ * Write one of the L2 SAW2's non-voltage PMIC ports: the SMPS phase count on
+ * port 1, the FTS mode on port 2.  Unlike the voltage port (0) these do not
+ * update PMIC_STS[7:0], so completion is confirmed by waiting for the PMIC FSM
+ * to return to idle (PMIC_STS[17:16] == 0), as the vendor does.  The next
+ * voltage write clears the port field back to 0.
+ */
+static int spm_saw_write_pmic_port(struct spm_driver_data *drv, u32 port,
+				   u32 data)
+{
+	unsigned int vctl, pmic_sts;
+
+	vctl = spm_register_read(drv, SPM_REG_VCTL);
+	vctl &= ~(SPM_2_1_VCTL_VLVL | SPM_2_1_VCTL_PORT);
+	vctl |= FIELD_PREP(SPM_2_1_VCTL_PORT, port) | (data & 0xff);
+	spm_register_write(drv, SPM_REG_VCTL, vctl);
+
+	return read_poll_timeout_atomic(spm_register_read, pmic_sts,
+					!(pmic_sts & SPM_2_1_PMIC_STS_STATE),
+					1, 200, false, drv, SPM_REG_PMIC_STS);
+}
+
+/*
  * smp_set_vdd_v2_1_l2 - Set voltage via L2/APCS SAW2 (MSM8974 gang supply).
  *
  * On MSM8974 only the L2 SAW2 at 0xf9012000 is wired to the PMIC via SPMI.
@@ -730,6 +763,28 @@ static int spm_dev_probe(struct platform_device *pdev)
 	/* Set up Standby as the default low power mode */
 	if (drv->reg_data->reg_offset[SPM_REG_SPM_CTL])
 		spm_set_low_power_mode(drv, PM_SLEEP_MODE_STBY);
+
+	/*
+	 * MSM8974 gang rail: put the SMPS into its heavy-load configuration
+	 * (PWM mode, all four phases) once at boot.  The bootloader leaves the
+	 * buck in a light-load configuration; it holds up under idle and
+	 * frequency transitions, but sustained multi-core load draws more
+	 * current than that configuration can supply and the SoC-side rail
+	 * droops into a silent PS_HOLD reset while VBAT stays healthy
+	 * (measured: identical 4-core load dies in seconds to minutes in the
+	 * boot configuration and runs indefinitely in PWM/4-phase).  The vendor
+	 * reaches the same state through its per-transition phase management;
+	 * setting it statically avoids that machinery (a per-transition port
+	 * write A/B-tested worse here) at the cost of PFM idle efficiency.
+	 */
+	if (drv->reg_data == &spm_reg_8974_8084_l2) {
+		if (spm_saw_write_pmic_port(drv, SPM_SAW_FTS_PORT, SPM_FTS_PWM))
+			dev_warn(&pdev->dev, "failed to set the SMPS to PWM\n");
+		udelay(50);	/* PFM -> PWM exit settle */
+		if (spm_saw_write_pmic_port(drv, SPM_SAW_PHASE_PORT, 3))
+			dev_warn(&pdev->dev, "failed to set 4-phase mode\n");
+		udelay(50);	/* phase-count raise settle */
+	}
 
 	if (IS_ENABLED(CONFIG_REGULATOR))
 		return spm_register_regulator(&pdev->dev, drv);
