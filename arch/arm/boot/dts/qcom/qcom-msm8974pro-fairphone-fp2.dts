@@ -542,8 +542,8 @@
 };
 
 &cpu_alert0 {
-	temperature = <90000>;
-	hysteresis = <10000>;
+	temperature = <70000>;
+	hysteresis = <5000>;
 };
 
 &cpu_crit0 {
@@ -552,8 +552,8 @@
 };
 
 &cpu_alert1 {
-	temperature = <90000>;
-	hysteresis = <10000>;
+	temperature = <70000>;
+	hysteresis = <5000>;
 };
 
 &cpu_crit1 {
@@ -562,8 +562,8 @@
 };
 
 &cpu_alert2 {
-	temperature = <90000>;
-	hysteresis = <10000>;
+	temperature = <70000>;
+	hysteresis = <5000>;
 };
 
 &cpu_crit2 {
@@ -572,8 +572,8 @@
 };
 
 &cpu_alert3 {
-	temperature = <90000>;
-	hysteresis = <10000>;
+	temperature = <70000>;
+	hysteresis = <5000>;
 };
 
 &cpu_crit3 {
