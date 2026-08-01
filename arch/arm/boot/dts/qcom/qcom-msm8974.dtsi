@@ -7,6 +7,10 @@
 #include <dt-bindings/clock/qcom,gcc-msm8974.h>
 #include <dt-bindings/clock/qcom,mmcc-msm8974.h>
 #include <dt-bindings/clock/qcom,rpmcc.h>
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interconnect/qcom,msm8974.h>
+#include <dt-bindings/thermal/thermal.h>
+#include <dt-bindings/interrupt-controller/arm-gic.h>
 #include <dt-bindings/power/qcom-rpmpd.h>
 #include <dt-bindings/reset/qcom,gcc-msm8974.h>
 #include <dt-bindings/gpio/gpio.h>
@@ -52,6 +56,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&cpu_spc>;
+			#cooling-cells = <2>;
 		};
 
 		cpu1: cpu@1 {
@@ -69,6 +74,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&cpu_spc>;
+			#cooling-cells = <2>;
 		};
 
 		cpu2: cpu@2 {
@@ -86,6 +92,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&cpu_spc>;
+			#cooling-cells = <2>;
 		};
 
 		cpu3: cpu@3 {
@@ -103,6 +110,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&cpu_spc>;
+			#cooling-cells = <2>;
 		};
 
 		l2: l2-cache {
@@ -2566,6 +2574,13 @@
 					type = "critical";
 				};
 			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_alert0>;
+					cooling-device = <&cpu0 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 
 		cpu1-thermal {
@@ -2584,6 +2599,13 @@
 					temperature = <110000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_alert1>;
+					cooling-device = <&cpu1 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};
@@ -2606,6 +2628,13 @@
 					type = "critical";
 				};
 			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_alert2>;
+					cooling-device = <&cpu2 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
+				};
+			};
 		};
 
 		cpu3-thermal {
@@ -2624,6 +2653,13 @@
 					temperature = <110000>;
 					hysteresis = <2000>;
 					type = "critical";
+				};
+			};
+
+			cooling-maps {
+				map0 {
+					trip = <&cpu_alert3>;
+					cooling-device = <&cpu3 THERMAL_NO_LIMIT THERMAL_NO_LIMIT>;
 				};
 			};
 		};

@@ -540,3 +540,44 @@
 &mdp_iommu {
 	status = "okay";
 };
+
+&cpu_alert0 {
+	temperature = <90000>;
+	hysteresis = <10000>;
+};
+
+&cpu_crit0 {
+	temperature = <105000>;
+	hysteresis = <3000>;
+};
+
+&cpu_alert1 {
+	temperature = <90000>;
+	hysteresis = <10000>;
+};
+
+&cpu_crit1 {
+	temperature = <105000>;
+	hysteresis = <3000>;
+};
+
+&cpu_alert2 {
+	temperature = <90000>;
+	hysteresis = <10000>;
+};
+
+&cpu_crit2 {
+	temperature = <105000>;
+	hysteresis = <3000>;
+};
+
+&cpu_alert3 {
+	temperature = <90000>;
+	hysteresis = <10000>;
+};
+
+&cpu_crit3 {
+	temperature = <105000>;
+	hysteresis = <3000>;
+};
+
