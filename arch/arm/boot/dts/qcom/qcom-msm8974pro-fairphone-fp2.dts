@@ -565,3 +565,22 @@
 	extcon = <&smbb>;
 	qcom,init-seq = /bits/ 8 <0x1 0x64>;
 };
+
+/ {
+	/*
+	 * Demand-side battery protection: cap the CPU while VBAT is low so
+	 * full load cannot out-draw the battery+charger and droop the SoC
+	 * rails (silent PS_HOLD).  960 MHz is this board's proven-safe
+	 * sustained operating point.  Thresholds are first-cut values for the
+	 * load-vs-VBAT mapping; module parameters override them at runtime.
+	 */
+	vbat-freqcap {
+		compatible = "qcom,vbat-freqcap";
+		io-channels = <&pm8941_vadc VADC_VBAT_SNS>;
+		io-channel-names = "vbat";
+		qcom,vbat-low-microvolt = <3800000>;
+		qcom,vbat-clear-microvolt = <3950000>;
+		qcom,cap-freq-khz = <960000>;
+		qcom,poll-ms = <1000>;
+	};
+};
