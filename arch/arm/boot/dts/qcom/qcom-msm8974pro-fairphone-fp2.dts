@@ -578,9 +578,9 @@
 		compatible = "qcom,vbat-freqcap";
 		io-channels = <&pm8941_vadc VADC_VBAT_SNS>;
 		io-channel-names = "vbat";
-		qcom,vbat-low-microvolt = <3800000>;
-		qcom,vbat-clear-microvolt = <3950000>;
-		qcom,cap-freq-khz = <960000>;
-		qcom,poll-ms = <1000>;
+		qcom,vbat-low-microvolt = <4050000>;
+		qcom,vbat-clear-microvolt = <4200000>;
+		qcom,cap-freq-khz = <300000>;
+		qcom,poll-ms = <30000>;
 	};
 };
