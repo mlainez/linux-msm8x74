@@ -1120,3 +1120,24 @@ plug/unplug validation suite. The three smbb DEFECTS remain real and open.
 R3 (topology fixes only — the 1840-transition trial-proven content) building;
 idle gate re-runs on it. Also noted: the R2 idle gate was interrupted by the
 unplug death at ~40 min (clock restarted).
+
+## R1 — BCL fate decided: REMOVE (all three authorities agree)
+User directive: after the R3b idle gate, "remove that 300MHz cap or at least
+make it more logical because this is useless in practice" (a 4.05 V trip sits
+above most of the discharge curve; the device would live at 300 MHz).
+Authority findings gathered during the gate:
+1. Vendor source (fairphone2-kernel drivers/power/battery_current_limit.c):
+   stock BCL never trips on raw VBAT; it models available current,
+   iavail_ma = (vbatt_mv - vbat_min) * 1000 / rbatt_mohm, mitigating only
+   when userspace (thermal-engine) arms a mA threshold.
+2. Live oracle (FP2 stock, old pack fully charged): /sys/devices/qcom,bcl.75
+   mode=enabled, poll 10 s, rbat=209 mohm, vbat_min=3400 mV, iavail=4736 mA —
+   and BOTH mitigation thresholds DISABLED (value 0). Stock Android ships
+   this device with battery-based CPU mitigation UNARMED. thermal-engine
+   runs; msm_thermal parameters show enabled=N.
+3. Own trial: 1,840 charging-active worst-battery transitions at full
+   frequency range with the cap parked — no reset (>=10x worst death).
+Verdict: revert 6.12/topic/bcl merge (51d6ce569416) from the integration ->
+R4. The topic branch retains the code; any future re-introduction must use
+the vendor iavail model, not a raw-voltage trip. Gates re-run on R4 as the
+final content (R3b gate = supporting data; single delta = BCL removal).
