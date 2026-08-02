@@ -1052,3 +1052,27 @@ P2: OPP pinned 300000 (same rail), load ONLY cpu0 (in-spec 300 MHz@800 mV),
 Outcome matrix: P1 dead + P2 alive ⇒ mechanism confirmed ⇒ fix = drop
 opp-shared (per-core policies; regulator core aggregates max across the four
 cpu-supply consumers = vendor's gang-voltage-max semantics) + fix sec-mux map.
+
+## R1 continued — topology fix necessary but insufficient; CHARGER implicated
+- Fixes b306ead1660b (sec-mux inversion) + f3137a48ac00 (drop opp-shared)
+  VALIDATED structurally on-device (image c7b087d10702): 4 per-core policies,
+  all cores scale (60/191/452 Miter/s tracked per OPP), voltage aggregation =
+  max of requests (1060 mV with one core at 2265.6). NECESSARY fixes.
+- V4 (old killer, load+transitions) on the fixed kernel at resting ~4.0 V:
+  still PS_HOLD, ~40 transitions. H5 devmem (APC gates to vendor values):
+  ~170 transitions — margin contributor, not mechanism.
+- E0b/E0a series sealed the charger: charging ACTIVE -> death at 40-170
+  transitions (and chg-gone IRQs on record, 62 on one boot); charging absent
+  (100 mA limit, latched-off, or engagement bug) -> 300/660+ transitions
+  ALIVE, at the lowest VBAT of the campaign (3.67 loaded), chg-gone=0
+  throughout. 4-for-4 correlation.
+- NEW defect found on the way: mainline smbb does not re-engage charging
+  without a physical insertion edge (plain reboot at VBAT 3.86 stays
+  Discharging, chg-fast IRQ never fires). Tracked separately.
+- FIX WRITTEN (937177edfdce, topic smbb-input-collapse): vendor-grounded
+  chg-gone/ARB response (charge off + force-run-on-battery 1 s, then
+  restore) + REV_BST comparator config enabled and corrected (the mainline
+  #if 0 block also had the unlock magic in the mask field).
+- Build R2 (all three fixes) compiling. NEXT: Marc replugs USB (restore
+  charging) -> stock-kernel charging-active death re-confirmed with IRQ log
+  -> flash R2 -> same test must survive -> then full gate ladder from zero.
