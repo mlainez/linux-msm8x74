@@ -151,9 +151,15 @@ krait_add_sec_mux(struct device *dev, int id, const char *s,
 {
 	int cpu, ret;
 	struct krait_mux_clk *mux;
+	/*
+	 * Parent order must line up with sec_mux_map: the hardware select
+	 * value for the aux source is 2 and for QSB is 0 (the vendor's
+	 * clock-krait-8974 MUX_SRC_LIST is the register-level reference).
+	 * The aux entry (index 0) is filled in below.
+	 */
 	static struct clk_parent_data sec_mux_list[2] = {
-		{ .name = "qsb", .fw_name = "qsb" },
 		{},
+		{ .name = "qsb", .fw_name = "qsb" },
 	};
 	struct clk_init_data init = {
 		.parent_data = sec_mux_list,
@@ -194,10 +200,10 @@ krait_add_sec_mux(struct device *dev, int id, const char *s,
 			clk = ERR_PTR(-ENOMEM);
 			goto err_aux;
 		}
-		sec_mux_list[1].fw_name = parent_name;
-		sec_mux_list[1].name = parent_name;
+		sec_mux_list[0].fw_name = parent_name;
+		sec_mux_list[0].name = parent_name;
 	} else {
-		sec_mux_list[1].name = "acpu_aux";
+		sec_mux_list[0].name = "acpu_aux";
 	}
 
 	ret = devm_clk_hw_register(dev, &mux->hw);
