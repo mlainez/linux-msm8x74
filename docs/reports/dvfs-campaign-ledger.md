@@ -967,3 +967,36 @@ Device experiments ONLY after authority synthesis, one variable each,
 pre-registered expected outcomes (E1 wall-charger A/B, E2 charging-disabled,
 E3 xpu disarm, E4 422.4/652.8 edge, E5 nr_cpus). Every experiment ends with
 PON+ramoops read. Ledger updated per result.
+
+## R1 update — Authority 4 (fork history) consumed
+Source: buildroot-external/package/msm8974-diag/RESET-COMPARISON.md (the
+2026-07-26/27 Android-vs-ours systematic comparison on the phone) + CP1
+artifacts.
+
+Adopted from its closed list (evidence recorded there): voltage tables/margin,
+MX/CX starvation (Android leaves MX disabled too — H4 KILLED), modem, AVS,
+HFPLL programming, thermal, PMIC over-temp, steady-state supply — RULED OUT.
+Rail *droop under load* was explicitly left OPEN there ("correct setpoint, no
+fault record, death only under load, clean idle — exactly the observed
+signature"); our SMPS PWM/4-phase fix later moved MTBF 30 s → 8–43 min but
+did not close the mid-VBAT case.
+
+NEW TOP SUSPECT (H5, from its §2.2 "structural, top suspect", never closed):
+per-core Krait power delivery unmanaged on ours. Android: per-core krait0..3
+regulators (LDO/BHS/bypass per core) over the gang rail; live registers
+APC_PWR_GATE_MODE=0x21, APC_PWR_GATE_DLY=0x30430600, MDD_CONFIG/MODE=
+0x190/0x2, LDO_VREF_SET managed. Ours: ALL ZERO / unmanaged, asymmetric
+LDO_VREF_SET, on a KPSS revision (0x20010000) where these registers decide
+the core power-switch mode. Mechanism candidate: per-core switch drop under
+current (after the gang rail — explains why forcing the rail to 1.0 V did
+not help), modulated by input conditions (battery) via switch supply.
+
+Methodological flag: the 2026-07-27 XPU err-fatal load A/B (disabled=30 s,
+enabled=600 s+) did not record battery state — potentially battery-confounded,
+like several of this week's own results. The err-fatal arming itself is an
+empirical fix with an admittedly opaque mechanism (doc says so) — Marc's
+directive applies to it too, eventually.
+
+H-list now: H1 charger input collapse (battery-dependence), H5 per-core APC
+power gates (load-dependence), H2 XPU-as-executioner (signature), H3 clock-
+source edge (300 vs ≥422). H4 dead. Awaiting A1/A1b/A2/A3+A5 agents.
