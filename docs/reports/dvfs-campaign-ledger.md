@@ -1104,3 +1104,19 @@ established as fundamentally moved (worst-draw evidence bounded); proceed to
 flash R2 (adds the smbb fix) and run the formal §1.1 gate ladder from zero.
 A death before 1700 = PON-attributed, ends the trial, and the smbb fix's
 A/B gains a clean baseline number.
+
+## R1 — smbb fix FAILS first hardware contact; reverted (honesty entry)
+On R2 (with 937177edfdce): (a) physical replug no longer re-engages charging
+(it did on the same day's stock kernel: insertion -> Charging + chg-fast);
+charge_type=N/A with chg-gone=4 fired through the new handler — suspect the
+assumed CHG_CTRL bit0 FORCE_BATT semantics (taken from vendor qpnp 0x49
+bit0) do not hold here and the handler leaves charging blocked, and/or the
+REV_BST comparator write changes chg-gone semantics at insertion; (b) an
+IDLE unplug produced a PS_HOLD death (new signature for idle) with the
+handler cycling CHG_CTRL during the removal transient. Verdict: fix reverted
+from int/d3 (merge revert); topic parked for redesign with silicon-verified
+bit semantics + guards against insertion-correlated chg-gone + its own
+plug/unplug validation suite. The three smbb DEFECTS remain real and open.
+R3 (topology fixes only — the 1840-transition trial-proven content) building;
+idle gate re-runs on it. Also noted: the R2 idle gate was interrupted by the
+unplug death at ~40 min (clock restarted).
