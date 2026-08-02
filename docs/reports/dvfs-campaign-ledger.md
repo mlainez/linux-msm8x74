@@ -1076,3 +1076,22 @@ cpu-supply consumers = vendor's gang-voltage-max semantics) + fix sec-mux map.
 - Build R2 (all three fixes) compiling. NEXT: Marc replugs USB (restore
   charging) -> stock-kernel charging-active death re-confirmed with IRQ log
   -> flash R2 -> same test must survive -> then full gate ladder from zero.
+
+## R1 correction — charger correlation BROKEN by counterexample (honesty entry)
+Sealing run (charging verified ACTIVE: charge_type=Fast, battery supplementing
+under load): 320+ transitions and climbing at the WORST VBAT of the campaign
+(3.65 loaded), chg-gone frozen. The 4-for-4 charging-death correlation is now
+4-for-5. Re-examination: the two post-topology-fix deaths (40, 170
+transitions) vs survivals (300/320+/660+, several censored by operator stop)
+are consistent with draws from one heavy-tailed distribution — the single-
+measurement trap RESET-COMPARISON explicitly warns about, repeated here.
+Confounder candidate for the two deaths: both were on the first boots after
+flashing (first-boot resize/init churn concurrent with the test load).
+What stands: topology fixes moved the killer MTBF from <30 s consistently to
+worst-draw 40 / median hundreds+ transitions. The smbb defects remain real
+(miswritten #if 0 comparator, no collapse response, no charging re-engagement
+without insertion edge) and the fix (937177edfdce) stays queued — but claims
+now require distribution-scale evidence: LONG horizons + repeats per arm.
+Protocol: current charging-active killer continues to a multi-hour horizon on
+the fixed kernel (c7b087d10702). R2 (with smbb fix) flashes after; then the
+formal gate ladder decides.
