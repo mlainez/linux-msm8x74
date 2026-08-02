@@ -2549,7 +2549,6 @@
 		compatible = "operating-points-v2-krait-cpu";
 		nvmem-cells = <&speedbin_efuse>;
 		nvmem-cell-names = "speedbin";
-		opp-shared;
 
 		/*
 		 * D3 (CP4): the Krait APC/L2 gang rail is now driven by the L2
