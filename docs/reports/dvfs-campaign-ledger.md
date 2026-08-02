@@ -1225,3 +1225,61 @@ management, voltage aggregation path, transition ordering). Suspicion
 list: L2 clock/voltage coupling absent in port (capability matrix R4 row
 was already marked "gap"); APC power-gate config (H5, known 4x margin);
 idle death resembles the 6.18 CX-corner idle-reset family.
+
+## SYNTHESIS 2026-08-03: the remaining silent-reset mechanism (authority
+## reads complete; conclusions drawn per user request, soaks halted)
+
+### Verified facts (live registers + both authority reads)
+1. All four APC power-gate blocks are UNPROGRAMMED on the running R4 DUT:
+   APC_PWR_GATE_MODE=0x0, APC_PWR_GATE_DLY=0x0 at
+   0xf9088000/0xf9098000/0xf90a8000/0xf90b8000 (+0x1c/+0x20), global
+   PWR_GATE_CONFIG(0xf9011044)=0x0. KPSS_VERSION=0x20010000 (pro silicon).
+   Vendor (krait-regulator.c kvreg_hw_init/glb_init) requires, BEFORE any
+   rail movement: PWR_GATE_CONFIG=0x0308736E, per-core MDD_CONFIG_CTL=0x190
+   + MDD_MODE=0x2, APC_PWR_GATE_DLY=0x30430600, APC_PWR_GATE_MODE=0x21
+   (HW sequencer enabled, BHS mode).
+2. Vendor dynamically manages per-core LDO-vs-BHS on EVERY gang voltage
+   change (FP2 numbers: siblings at 960 MHz/840 mV go to internal LDO at
+   827.5 mV whenever vmax>=977.5 mV, and MUST return to BHS before the
+   rail drops - decrease path is mode-first-then-rail). Our port has none
+   of this; with MODE=0 the LDO is at least not engaged, but the
+   sequencer that makes gate transitions make-before-break is OFF.
+3. The historical H5 devmem experiment (programming exactly these
+   registers) gave ~4x transition survival (170 vs 40) - the strongest
+   on-device evidence tying this block to the death mechanism.
+4. L2-undervolt hypothesis REFUTED by the vendor read: L2 logic is powered
+   from the CX corner (pinned SUPER_TURBO in our DT = protected), not the
+   swinging gang rail. Our static L2 @729.6 MHz (verified in boot log,
+   krait-cc leaves it at boot rate; vendor would run 960-1728 MHz under
+   load) is a PERFORMANCE gap, not the brownout.
+5. Our spm.c static 4-phase+PWM probe config conservatively covers the
+   vendor's dynamic phase/PFM management (vendor: phases from load,
+   4 phases for 4 loaded cores; PFM only if 1 core online and idle).
+6. Mainline transition ordering (volt-then-clk up / clk-then-volt down,
+   820<->1040 mV swings, 176 us ramp, HFPLL full disable+relock per flip,
+   park on sec-mux/aux) matches vendor EXCEPT: no SCHED_FIFO boost (longer
+   parked windows), and a 200 us lock-poll give-up that switches onto a
+   possibly-unlocked PLL (no WARN observed - not currently firing).
+
+### Conclusion
+The load+transition silent reset (and plausibly the rarer idle death -
+schedutil swings the same rail at idle) is attributed with high
+confidence to gang-rail voltage swings executed while the per-core APC
+power-gate/MDD hardware is unconfigured (vendor invariant I3 violated
+outright; I2's dynamic mode management absent). The R1 fixes (opp-shared,
+sec-mux order) were real defects but addressed a different layer; the
+1,840-flip trial that "validated" them is quarantined (BCL cap suspicion).
+
+### Next session plan (pre-registered)
+1. Port vendor kvreg_hw_init/glb_init as a proper boot-time config (all
+   four cores + global): PWR_GATE_CONFIG=0x0308736E, MDD 0x190/0x2,
+   DLY=0x30430600, MODE=0x21 (sequencer-BHS, static - no LDO use, so no
+   dynamic mode management needed). Candidate home: spm.c probe or a
+   small qcom,krait-apc platform driver on 6.12/topic/krait-apc.
+2. Re-run EXP-1 (PA replica): prediction = death MTBF rises >>162 s; then
+   staged gates per section 1.1 from scratch.
+3. If deaths persist: next candidates in order = SCHED_FIFO-boosted
+   transitions (I9), load-hint/phase dynamics (I1/I10), HFPLL lock-fail
+   logging (I7).
+4. Trial harness rebuild: transition driver must verify flips via
+   total_trans + scaling_cur_freq (never trust write counts; BCL lesson).
