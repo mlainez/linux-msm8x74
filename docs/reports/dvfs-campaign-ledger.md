@@ -1141,3 +1141,28 @@ Verdict: revert 6.12/topic/bcl merge (51d6ce569416) from the integration ->
 R4. The topic branch retains the code; any future re-introduction must use
 the vendor iavail model, not a raw-voltage trip. Gates re-run on R4 as the
 final content (R3b gate = supporting data; single delta = BCL removal).
+
+## R3b — §1.1 IDLE GATE: PASS (111.3 min, formally verified from device log)
+Kernel 7b678aaffb49 (tree byte-identical to trial kernel c7b087d10702).
+Evidence (/root/soak/idle-gate-r3b.log, fsync'd 30 s samples): 223 samples,
+0 uptime regressions, 0 gaps > 61 s, up=474 s -> 7119 s = 111.3 min
+continuous (171% of the 65 min floor). Full-range per-core DVFS under
+schedutil throughout: per-policy freq histograms all multi-rung
+(p0: 300k..2265.6k incl. 13 samples at max; p1 up to 1958.4k; p2 up to
+2265.6k; p3 up to 1728k), histograms differ per policy = independent
+scaling. Charging active (Fast) the whole gate, VBAT 3.80->3.86 V,
+temps ~52-53 C. PON shows no reset since the deliberate flash reboot.
+Conditions/deltas: BCL parked via module params (low=3.0 V); soak-logger
+not present as a unit; no pins. Host watcher died at user logout (user
+systemd unit, no linger) — verdict taken from the device-side log per
+design; lesson: enable-linger or judge on DUT uptime only (done).
+Replug test on R3b earlier: unplug survived idle + charging re-engaged
+to Fast on live insertion (host USB log 15:35:15/15:35:30 proves the
+physical event) — both R2 smbb-fix failure modes absent after revert.
+
+## R4 — BCL removed per user directive; gates to re-run on final content
+User: "we need to remove that 300MHz cap or at least make it more logical".
+int/d3 = 25d9f7b2ce9e: revert of bcl merge 51d6ce569416 (driver + Kconfig +
+Makefile + DT node, -262 lines) + CONFIG_QCOM_VBAT_FREQCAP scrubbed from
+buildroot linux-612.config. Single delta vs R3b = BCL removal. R4 idle gate
++ overnight load soak = the formal gates on shipping content.
