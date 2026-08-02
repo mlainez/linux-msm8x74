@@ -1196,3 +1196,32 @@ floor raised to 3.70/3.85 V (death band was 3.65-3.69); GUARD-giveup
 parks idle forever after 45 min of no recovery instead of risking the DUT.
 ATTEMPT 2 armed same night on the same R4 content, single verified
 instance.
+
+## R4 night ATTEMPT 2 + morning: TWO more deaths — the load+transition face
+## is ALIVE on R4, and one death was IDLE. Trial validity now in doubt.
+Attempt 2 (clean harness, single instance, charger held all night, VBAT
+3.9-4.0, guard never needed): P0 idle gate PASSED (130/130 samples, third
+idle pass on R4). Then DEATH 162 s into PA-transforce-c1 (cores 1-3 @960
+loaded, policy0 userspace flips 300<->2265.6 per 4 s). pon=0x11
+warm_reset=0x0002 poff=0x0002, ramoops silent. Temps 62-76 C. Note: the
+thermal staircase was re-capping policy0 (cur 1267/1728 vs set 2265.6)
+during the flips.
+Death #3 (morning): EXP-1 (PA replica) never started - scp died mid-
+transfer; the device reset IDLE ~12 min into the boot (54 C, charging,
+schedutil). Same PS_HOLD signature. The death boot's ramoops shows
+repeated sdhci mmc1 pwr_irq timeouts (also seen on the attempt-1 death
+boot at t=17-25 s, but ZERO on the current boot) - marker of degraded
+post-reset boots, parked as observation.
+HONESTY: the 1,840-transition trial ran on the kernel WITH the BCL driver
+present, on a 3.7-3.8 V pack, BEFORE the "BCL caps policy0 below 4.05 V"
+lesson was learned at R2 validation. If BCL's freq_qos cap was active,
+policy0's forced flips were clamped (possibly 300<->300 no-ops) and the
+trial validated far less than recorded. The trial's flip evidence is
+QUARANTINED until the v4 driver's actual effect is re-established.
+Status: all load experiments HELD. §3.1 wall protocol engaged - parallel
+authority reads running (vendor Krait transition invariants incl. L2
+fmax/voltage coupling + APC LDO/BHS; own-tree audit of L2 clock
+management, voltage aggregation path, transition ordering). Suspicion
+list: L2 clock/voltage coupling absent in port (capability matrix R4 row
+was already marked "gap"); APC power-gate config (H5, known 4x margin);
+idle death resembles the 6.18 CX-corner idle-reset family.
