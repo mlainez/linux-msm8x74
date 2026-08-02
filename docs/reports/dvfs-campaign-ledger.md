@@ -914,3 +914,56 @@ after flashes. Remote pushes unlocked.
   Marc's call. Root-cause research track (why any-freq load kills at low VBAT
   without the cap; charger-path/l24/XPU; wall-charger A/B; exact safe-freq
   edge 300–729) continues behind the mitigation.
+
+# INVESTIGATION R1 (2026-08-02): root cause of the mid-VBAT load reset
+## (Marc's directive: no workarounds — real root cause, oracle-equivalent
+## stability. BCL cap demoted to parked experiment; load soak cancelled.)
+
+## Pre-registered facts (all measured, this campaign)
+F1 Idle: bulletproof at any VBAT (82.5M transitions overnight).
+F2 Load 4x300 MHz at 3.86 V: stable 29+ min.
+F3 Load ≥729.6 MHz at ≲4.0 V: silent PS_HOLD in 0.5–3 min — INDEPENDENT of
+   cpu frequency (729.6/960/2265.6 alike) and of CPU rail voltage (bin values
+   and devmem-forced 1.00 V alike).
+F4 Load full-range at ≥4.17 V: 30–43 min clean (longest run ended by user).
+F5 Same old pack under Android at 3.85 V (on AC 1.5 A): 30 min load-22, no
+   BCL, thermal throttling only.
+F6 VBAT telemetry (35 Hz, fsync): flat at the death instant — no slow sag.
+F7 PON: PS_HOLD (0x0002) for load deaths; separate rarer signature
+   poff=0x0000+warm_reset for idle deaths around battery-swap/charger events.
+F8 Ramoops: console silent to the end — kernel never sees it coming.
+F9 Confound known: our failures were on a ~0.5 A USB host port; Android's
+   clean run was on AC. Not yet controlled.
+
+## Hypotheses (pre-registered, ranked)
+H1 Charger input-path collapse: mainline smbb lacks vendor AICL/VIN_MIN
+   input-collapse regulation; at mid battery the charger pulls max input
+   current, load transients collapse VBUS/VPH, PMIC disturbance (l24/OVP/
+   reverse-boost events) upsets the SoC. Predicts: battery-dependence (full
+   pack = no charge current = no collapse), idle safety, 300-MHz safety
+   (demand ≈ input), Android immunity (AICL), wall-charger immunity.
+H2 XPU err-fatal is the executioner for a violation generated on that
+   disturbance path (D0 arms it; vendor TZ also armed but vendor never
+   generates the violation). Predicts: disarming xpu_errfatal turns resets
+   into hangs/survival.
+H3 Clock-source edge: 300 MHz runs from the aux mux; ≥422.4 engages HFPLLs.
+   The survive/die edge may be the PLL-engagement edge (PLL supplies?).
+H4 Missing per-rung MX/vdd_mem votes (vendor acpuclock voted vdd_mem/
+   vdd_dig per rung; our port pins CX only).
+
+## Authority walk (all five, parallel, per BLUEPRINT §6.1)
+A1 vendor charger source (qpnp-charger vs smbb) — agent running.
+A1b vendor acpuclock/krait supplies (vdd_mem/vdd_dig votes, HFPLL supplies,
+    krait-cc rung↔source map) — agent.
+A2 live oracle: charger runtime state under load at mid battery (old pack is
+   in the Android device NOW) — agent over adb.
+A3 sibling ports: msm8974-mainline/pmaports smbb patches or documented load
+   resets — agent.
+A4 fork history: our own charger/l24/CP1 artifacts — self.
+A5 upstream history: smbb/pm8941 fixes after v6.12 — agent.
+
+## Discipline
+Device experiments ONLY after authority synthesis, one variable each,
+pre-registered expected outcomes (E1 wall-charger A/B, E2 charging-disabled,
+E3 xpu disarm, E4 422.4/652.8 edge, E5 nr_cpus). Every experiment ends with
+PON+ramoops read. Ledger updated per result.
