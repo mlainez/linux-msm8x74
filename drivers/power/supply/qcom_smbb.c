@@ -26,6 +26,7 @@
 #include <linux/power_supply.h>
 #include <linux/regmap.h>
 #include <linux/slab.h>
+#include <linux/workqueue.h>
 #include <linux/extcon-provider.h>
 #include <linux/regulator/driver.h>
 
@@ -37,6 +38,7 @@
 #define SMBB_CHG_VIN_MIN	0x047
 #define SMBB_CHG_CTRL		0x049
 #define CTRL_EN			BIT(7)
+#define CTRL_FORCE_BATT		BIT(0)
 #define SMBB_CHG_VBAT_WEAK	0x052
 #define SMBB_CHG_IBAT_TERM_CHG	0x05b
 #define IBAT_TERM_CHG_IEOC	BIT(7)
@@ -123,6 +125,8 @@ struct smbb_charger {
 
 	struct regulator_desc otg_rdesc;
 	struct regulator_dev *otg_reg;
+
+	struct delayed_work arb_stop_work;
 };
 
 static const unsigned int smbb_usb_extcon_cable[] = {
@@ -438,11 +442,44 @@ static irqreturn_t smbb_chg_done_handler(int irq, void *_data)
 	return IRQ_HANDLED;
 }
 
+/*
+ * "Charger gone" fires when the buck's input collapses.  With a live input
+ * still attached that is the reverse-boost oscillation: the buck back-drives
+ * the battery onto the sagging input and the charger flaps, disturbing the
+ * PMIC hard enough under CPU load transients to silently reset the SoC
+ * (measured: sustained-load DVFS cycling dies within tens of transitions
+ * with charging active, and runs indefinitely on battery only).  Do what the
+ * vendor driver does: kick the charger off the input and force it to run
+ * from the battery for a second, then restore.
+ */
+#define ARB_STOP_WORK_MS	1000
+
+static void smbb_arb_stop_work(struct work_struct *work)
+{
+	struct smbb_charger *chg = container_of(work, struct smbb_charger,
+						arb_stop_work.work);
+
+	regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+			   CTRL_FORCE_BATT, 0);
+	regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+			   CTRL_EN, CTRL_EN);
+}
+
 static irqreturn_t smbb_chg_gone_handler(int irq, void *_data)
 {
 	struct smbb_charger *chg = _data;
 
 	smbb_set_line_flag(chg, irq, STATUS_CHG_GONE);
+
+	if (chg->status & (STATUS_USBIN_VALID | STATUS_DCIN_VALID)) {
+		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				   CTRL_EN, 0);
+		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				   CTRL_FORCE_BATT, CTRL_FORCE_BATT);
+		schedule_delayed_work(&chg->arb_stop_work,
+				      msecs_to_jiffies(ARB_STOP_WORK_MS));
+	}
+
 	power_supply_changed(chg->bat_psy);
 	power_supply_changed(chg->usb_psy);
 	if (!chg->dc_disabled)
@@ -741,10 +778,14 @@ static const struct reg_off_mask_default {
 	/* Stop USB enumeration timer */
 	{ SMBB_USB_ENUM_TIMER_STOP, ENUM_TIMER_STOP, ENUM_TIMER_STOP },
 
-#if 0 /* FIXME supposedly only to disable hardware ARB termination */
-	{ SMBB_USB_SEC_ACCESS, SEC_ACCESS_MAGIC },
+	/*
+	 * Configure the reverse-boost/chg-gone comparator the way the vendor
+	 * driver does (its hwinit writes SEC_ACCESS then REV_BST = 0x80).
+	 * The original block was disabled and also wrote the unlock magic
+	 * into the mask field instead of the value.
+	 */
+	{ SMBB_USB_SEC_ACCESS, 0xff, SEC_ACCESS_MAGIC },
 	{ SMBB_USB_REV_BST, 0xff, REV_BST_CHG_GONE },
-#endif
 
 	/* Stop USB enumeration timer, again */
 	{ SMBB_USB_ENUM_TIMER_STOP, ENUM_TIMER_STOP, ENUM_TIMER_STOP },
@@ -843,6 +884,7 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->dev = &pdev->dev;
 	mutex_init(&chg->statlock);
+	INIT_DELAYED_WORK(&chg->arb_stop_work, smbb_arb_stop_work);
 
 	chg->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chg->regmap) {
@@ -1006,6 +1048,7 @@ static void smbb_charger_remove(struct platform_device *pdev)
 
 	chg = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&chg->arb_stop_work);
 	regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL, CTRL_EN, 0);
 }
 
