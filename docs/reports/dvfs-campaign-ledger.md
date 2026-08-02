@@ -1095,3 +1095,12 @@ now require distribution-scale evidence: LONG horizons + repeats per arm.
 Protocol: current charging-active killer continues to a multi-hour horizon on
 the fixed kernel (c7b087d10702). R2 (with smbb fix) flashes after; then the
 formal gate ladder decides.
+
+## R1 horizon trial — pre-registered stopping criterion
+The two post-topology-fix deaths were at 40 and 170 transitions. STOP RULE:
+survival past 1700 transitions (10x the worst death) under charging-active
+worst-battery conditions = the topology-fixed kernel's distribution is
+established as fundamentally moved (worst-draw evidence bounded); proceed to
+flash R2 (adds the smbb fix) and run the formal §1.1 gate ladder from zero.
+A death before 1700 = PON-attributed, ends the trial, and the smbb fix's
+A/B gains a clean baseline number.
