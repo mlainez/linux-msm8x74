@@ -876,3 +876,41 @@ rc promotion is a human decision.
 
 Bench notes: device SSH is password auth (root/root) per Marc — no key dance
 after flashes. Remote pushes unlocked.
+
+# SESSION 5 (2026-08-02) — battery A/Bs, BCL mitigation, §1.1 idle gate PASS
+
+## The load-death picture, finally complete (battery-swap A/Bs)
+- Android oracle ran ~30 min flat-out on the "bad" pack (and FP2 Android has
+  NO BCL: no /sys/devices/platform/battery_current_limit, none in
+  thermal-engine-8974.conf) → pack functional; contamination note: oracle was
+  on AC (1.5 A) vs DUT on a 0.5 A host port.
+- Build E replica + healthy pack: **43 min continuous max-effort load, 0
+  resets** (ended by battery swap, not failure) vs Build G same pack 8.4 min →
+  the v2-era BCL driver's 1 s VADC polling degraded load stability; v2.1
+  drops to 30 s polls.
+- Drained pack (~3.86 V): load at ANY freq (2265.6/960/729.6, rail up to a
+  devmem-forced 1.0 V) died 0.5–3 min → NOT rail voltage, NOT frequency;
+  input-side transient behavior. **At the 300 MHz cap the same 4-core load ran
+  29+ min clean** → the preventive cap is the effective mitigation.
+
+## BCL v2.1 (qcom_vbat_freqcap) — Marc's "don't reset on drained battery"
+- Preventive: trips on resting VBAT (FP2: <4.05 V → cap 300 MHz; release
+  >4.20 V; poll 30 s; hotplug off by default — the kernel-side freq_qos cap
+  alone was measured sufficient and userspace cannot undo it).
+- Validated on-device: cap engaged 9 s after boot on the drained pack; 29+
+  min of 4-core load, no reset, 53 °C.
+
+## §1.1 IDLE GATE: **PASS** (final image 66fb2453edd9 = staging+bcl v2.1)
+- 66 min, schedutil, full range (mitigation thresholds parked for the soak),
+  no pins, no load, single boot, zero kernel warnings. Health green
+  (remoteprocs 3/3, 0 IOMMU faults, sensors 3/3).
+
+## Staging
+- `6.12/staging` = `51d6ce569416` (bcl merged after merged-image validation);
+  tree bit-identical to the validated int/d3. LOCAL ONLY (no pushes, Marc).
+
+## Remaining
+- Overnight LOAD soak on the final image (tonight) → then rc promotion is
+  Marc's call. Root-cause research track (why any-freq load kills at low VBAT
+  without the cap; charger-path/l24/XPU; wall-charger A/B; exact safe-freq
+  edge 300–729) continues behind the mitigation.
