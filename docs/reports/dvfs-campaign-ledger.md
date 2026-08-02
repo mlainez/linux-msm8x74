@@ -1166,3 +1166,33 @@ int/d3 = 25d9f7b2ce9e: revert of bcl merge 51d6ce569416 (driver + Kconfig +
 Makefile + DT node, -262 lines) + CONFIG_QCOM_VBAT_FREQCAP scrubbed from
 buildroot linux-612.config. Single delta vs R3b = BCL removal. R4 idle gate
 + overnight load soak = the formal gates on shipping content.
+
+## R4 night soak ATTEMPT 1: INVALID TEST (harness bug), death real but unattributable
+Timeline (log preserved: /root/soak/night-soak-r4-attempt1.log on DUT):
+- v1 soak started (no guard); 10 min into P0 a guarded v2 was swapped in.
+  killall sent TERM to v1, but busybox sh delivers pending signals only
+  after the current command - v1 was inside sleep 3900 - AND the trap had
+  no exit. v1 logged STOPPED at up=4071 and CONTINUED into its load loop.
+- Result: TWO interleaved schedules offset 585 s from up=4071 (double spin
+  load, dueling policy0 flip drivers, each kill_load truncating the other).
+- Charger status flipped Discharging ~60 s into (doubled) load; pack sank
+  3.80 -> 3.65 V over 2.2 h. Guard floor 3.55 V never reached before death.
+- DEATH at up~11880 during (nominally) PB-split-cpu1-c3: silent PS_HOLD
+  (pon=0x11 warm_reset=0x0002 poff=0x0002), console-ramoops confirms zero
+  kernel output at death (no oops/panic - the classic silent signature),
+  VBAT ~3.69 V, battery-only-equivalent margin. Same family as the
+  documented input-power wall; NOT attributable to kernel content given
+  the contaminated conditions. Kernel survived 2.2 h of accidental
+  double-torture on a sinking pack before dying.
+- Still valid: P0 window up 171-4071 was pure idle (both instances idle) =
+  SECOND clean 65-min idle-gate pass on R4. Charger re-engaged by itself
+  at reboot (Fast). Death-boot ramoops also shows mss first-try boot
+  failure (-110, recovered later) + early-boot RCU expedited stall notice
+  - filed as observations.
+Harness bugs fixed in v3 (single variable discipline applies to the
+instrument too): trap now exits; PID-file single-instance guard; phase
+attribution via file (all attempt-1 samples falsely said P0-idle); guard
+floor raised to 3.70/3.85 V (death band was 3.65-3.69); GUARD-giveup
+parks idle forever after 45 min of no recovery instead of risking the DUT.
+ATTEMPT 2 armed same night on the same R4 content, single verified
+instance.
