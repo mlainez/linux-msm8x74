@@ -1000,3 +1000,31 @@ directive applies to it too, eventually.
 H-list now: H1 charger input collapse (battery-dependence), H5 per-core APC
 power gates (load-dependence), H2 XPU-as-executioner (signature), H3 clock-
 source edge (300 vs ≥422). H4 dead. Awaiting A1/A1b/A2/A3+A5 agents.
+
+## R1 update — Authorities A2 (oracle live), A3 (siblings), A5 (upstream) consumed
+- A2 REFINES H1: Android's input is CDP@1.5A (same limit as our DT), NO AICL
+  running, VIN_MIN never exercised, USBIN rock-steady 4.52V under full load.
+  Android's resilience = PMIC battery-supplement mode (battery sources the
+  deficit, +0.77A discharge while "Charging", Vbat 3.74V routine). The naive
+  "1.5A into a 500mA port" story is NOT what saves Android.
+- A3/A5: nobody in siblings/pmaports ever hit or tested this; upstream has
+  ZERO functional smbb changes v6.12..v6.18; our charger DT values are from a
+  2022 provenance-less commit. If charger-side, the fix must be written new.
+- Existing evidence vs H1-oscillating: through EVERY killer-load death, the
+  USB gadget link (VBUS-dependent) stayed up until the reset instant — cyclic
+  VBUS collapse would have dropped networking first. H1 narrows to
+  "single terminal collapse" or dies.
+
+## R1 pre-registered experiments E0a/E0b (run when VBAT < ~4.0, drain running)
+E0a: killer load (4-core, ≥729.6) at ~1.5A input; sample /proc/interrupts
+  (smbb usbin-valid/chg-gone lines) every 2s fsync'd + watch host-side USB
+  events. EXPECT if input-collapse: IRQ anomalies / link flap before death.
+  EXPECT if H5/internal: clean IRQ counts to the death instant.
+E0b: same load with input limit forced 100000 uA (battery-only; runtime knob
+  /sys/class/power_supply/smbb-usbin/charge_control_limit, restore after).
+  EXPECT if charger/input path is causal: reset STOPS (or signature changes).
+  EXPECT if H5/internal: reset persists identically -> H1 DEAD, H5 leads.
+H5 discriminator (pending A1b agent data): program the per-core APC
+  PWR_GATE_MODE/DLY (+MDD, LDO_VREF) to the vendor's live values via devmem
+  (register offsets from vendor krait-regulator source), rerun killer load.
+  No rebuild needed if offsets confirm ACS-space registers.
