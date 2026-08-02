@@ -1028,3 +1028,27 @@ H5 discriminator (pending A1b agent data): program the per-core APC
   PWR_GATE_MODE/DLY (+MDD, LDO_VREF) to the vendor's live values via devmem
   (register offsets from vendor krait-regulator source), rerun killer load.
   No rebuild needed if offsets confirm ACS-space registers.
+
+## R1 — ROOT CAUSE FOUND (register-proven, 2026-08-02)
+Per-core pinned benchmarks at three OPPs: CPU0 scales exactly with the OPP
+(451/188/60 Miter/s at 2265.6/960/300); **CPUs 1-3 constant ~191 Miter/s
+(≈960 MHz) at every OPP — they have never scaled.** Cause: `opp-shared` in
+the D2-ported cpu_opp_table → single cpufreq policy → cpufreq-dt sets only
+CPU0's clock; cores 1-3 remain at boot rate. (6.18 fork and Android: four
+per-core policies; the RESET-COMPARISON doc recorded this and the port
+ignored it.) Meanwhile the gang-rail voltage follows CPU0's OPP
+(800→1060 mV) while cores 1-3 need ≥820 mV for their fixed 960 MHz.
+MECHANISM: any low CPU0-OPP undervolts loaded cores 1-3 → silent PS_HOLD;
+idle immune (WFI); Android immune (all cores scale); battery level sets the
+margin; caps lowered the rail and made it worse. Also found on the way, real
+and separate: krait-cc sec-mux parent map inverted vs vendor register truth
+(upstream parent_data regression) — OPP-300/aux writes hw sel of QSB.
+
+## R1 mechanism-proof pair (pre-registered; VBAT ~4.0 = repro zone)
+P1: OPP pinned 300000 (rail 800 mV), load ONLY cores 1-3 (affinity spinners;
+    cpu0 idle). PREDICT: dies fast (960 MHz cores at 800 mV under load).
+P2: OPP pinned 300000 (same rail), load ONLY cpu0 (in-spec 300 MHz@800 mV),
+    cores 1-3 idle/WFI. PREDICT: survives (bounded 10-min observation).
+Outcome matrix: P1 dead + P2 alive ⇒ mechanism confirmed ⇒ fix = drop
+opp-shared (per-core policies; regulator core aggregates max across the four
+cpu-supply consumers = vendor's gang-voltage-max semantics) + fix sec-mux map.
