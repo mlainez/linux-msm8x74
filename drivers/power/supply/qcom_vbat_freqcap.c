@@ -49,9 +49,9 @@ static unsigned int poll_ms;
 module_param(poll_ms, uint, 0644);
 MODULE_PARM_DESC(poll_ms, "battery voltage poll interval (ms)");
 
-static bool hotplug = true;
+static bool hotplug;
 module_param(hotplug, bool, 0644);
-MODULE_PARM_DESC(hotplug, "also offline secondary CPUs while mitigated");
+MODULE_PARM_DESC(hotplug, "also offline secondary CPUs while mitigated (the freq cap alone was measured sufficient; userspace hotplug managers may fight this)");
 
 struct vbat_freqcap {
 	struct device *dev;
@@ -68,18 +68,20 @@ static void vbat_freqcap_mitigate(struct vbat_freqcap *vfc, int uv)
 	unsigned int cpu;
 	int ret;
 
-	ret = freq_qos_update_request(&vfc->qos, cap_freq_khz);
-	if (ret < 0)
-		return;
-	vfc->capped = true;
-	dev_info(vfc->dev, "VBAT %d uV low: capping the CPU at %u kHz\n",
-		 uv, cap_freq_khz);
+	if (!vfc->capped) {
+		ret = freq_qos_update_request(&vfc->qos, cap_freq_khz);
+		if (ret < 0)
+			return;
+		vfc->capped = true;
+		dev_info(vfc->dev, "VBAT %d uV low: capping the CPU at %u kHz\n",
+			 uv, cap_freq_khz);
+	}
 
-	if (!hotplug || vfc->cpus_off)
+	if (!hotplug)
 		return;
 	/*
-	 * Idle-class demand is the only state measured stable on a drained
-	 * pack: take the secondary cores down too.  CPU0 always stays.
+	 * Re-assert on every poll: userspace (udev coldplug, hotplug
+	 * managers) can bring cores back behind our back.  CPU0 always stays.
 	 */
 	for_each_online_cpu(cpu) {
 		if (cpu == 0)
@@ -134,7 +136,7 @@ static void vbat_freqcap_work(struct work_struct *work)
 	/* A clear threshold at or below the low one would oscillate. */
 	clear_uv = max(vbat_clear_uv, vbat_low_uv + 50000);
 
-	if (!vfc->capped && uv < vbat_low_uv)
+	if (uv < vbat_low_uv)
 		vbat_freqcap_mitigate(vfc, uv);
 	else if (vfc->capped && uv > clear_uv)
 		vbat_freqcap_release(vfc, uv);
