@@ -1454,3 +1454,39 @@ smbb engagement defect promoted to active item, fix BY THE METHODOLOGY:
 Fix gets its own plug/unplug validation suite (bench rules from the
 reverted 937177edfdce attempt apply: silicon-verified bit semantics,
 insertion-guarded handlers).
+
+## 2026-08-03 CASE CLOSED #2: idle battery-signature deaths = smbb BAT_IF
+## misconfiguration. Fix validated behaviorally (R7 verdict run PASSED).
+Evidence chain: 4 idle deaths (poff=0x2000, instant cut at healthy VBAT
+4.10-4.30, chgirq static, health Good in samples) all with ONE pack; same
+pack runs all day under vendor kernel (Marc's key observation); other
+pack passed 69-min gate in same slot/kernel (R6, gate 4, one asterisk:
+~16 s SPMI-warning perturbation from a register-dump accident at ~2280 s).
+Mechanism (from vendor deep-read): mainline armed BTC comparators
+(BAT_BTC_CTRL COMP_EN + range) while never forcing the thermistor bias
+(BAT_IF_VREF_BAT_THM_CTRL 0x124A[7:6]) nor selecting the presence source
+(BAT_IF_BPD_CTRL 0x1248[1:0]); floating-thermistor sensing lets the PMIC
+transiently read battery-absent -> hardware battery-pull power cut =
+poff 0x2000. Vendor on FP2: BPD=THM, VREF forced on, comparators LEFT
+UNARMED (mask=0 no-op).
+FIX: 6.12/topic/smbb-batif-safety b7d064b2eb9d (program BPD+VREF vendor
+values, stop arming BTC comparators/range). R7 = int/d3 eab3d5f7607e.
+VERDICT RUN (deadly pack + R7): 66 min idle at 4.24-4.31 V, 1 Hz health
+poll ZERO flickers, zero resets. Attribution note: comparator never
+caught in the act (no flicker) - conviction is by elimination +
+mechanism + single-variable outcome change; strongest non-invasive form.
+Ops lessons hard-learned today: REJECTED tool commands still execute
+remote side effects (3 confirmed cases - treat as executed, verify);
+PMIC regmap debugfs reads are unsafe at any granularity (full dump AND
+seek reads spray refused SPMI addresses -> pmic_arb WARN storms; 40+40
+warnings) - register verification belongs in the driver as bounded
+probe prints; reflash wipes /root incl. BOOTS registry (pull logs
+before flashing).
+SCOREBOARD 2026-08-03: two root causes fixed and validated in one day -
+(1) spm vsel cache poisoning (DVFS killer; 450/450 at 11x death horizon)
+(2) smbb BAT_IF sensing (idle deaths; 66-min verdict run).
+REMAINING for §1.1 on R7: killer replication on R7 (R6-validated content
++ charger patch only), full idle gate (banked: this verdict run counts),
+overnight load soak, staging merge. Charger tier-2 (engagement watchdog,
+EOC re-arm, trickle workaround, REV_BST corrected) = next topic, with
+the plug/unplug validation suite.
