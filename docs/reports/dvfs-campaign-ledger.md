@@ -1283,3 +1283,26 @@ sec-mux order) were real defects but addressed a different layer; the
    logging (I7).
 4. Trial harness rebuild: transition driver must verify flips via
    total_trans + scaling_cur_freq (never trust write counts; BCL lesson).
+
+## 2026-08-03 (day): krait-apc fix built per synthesis; oracle-verified plan
+EXP-0 (runtime devmem programming) ABORTED as method: Marc rejected the
+batch and reported a devmem write reset the DUT - runtime writes to the
+live power-gate block are unsafe. Data point folded into the design:
+programming must happen at boot before the cores scale (vendor does it at
+regulator probe; we do it in krait_cc_probe BEFORE CPU clock registration,
+so no cpufreq transition can precede it by construction).
+Oracle plan verification (no /dev/mem on stock kernel; used vendor
+regulator debugfs live): per-core requests 800/890/890/890 mV idle ->
+1040 mV rail with cpu0 forced to 2265.6 (matches our DT bin exactly);
+ALL cores stayed mode=BHS through the swing; LDO engages only for cores
+<=850 mV under a high rail (formula check). Static sequencer-BHS is a
+conservative subset of observed vendor behavior. PLAN CONFIRMED.
+6.12/topic/krait-apc = ed54c8b527ca (stacked on krait-clk; both touch
+krait-cc.c): glb PWR_GATE_CONFIG 0x0308736e (KPSS>2.0), per-core MDD
+0x190/0x2 + DLY 0x30430600 + MODE 0x21, before clk registration.
+Compiles warning-free. int/d3 = f97cca4b2547 (R5). Build R5 running.
+EXP-1 pre-registration (on R5): PA replica (3x spin@960 + policy0
+300<->2265.6 per 4 s). Baseline deaths: 162 s and <60 s. Stop rule:
+1800 s / 450 transitions = >10x baseline -> hypothesis confirmed, then
+repeat 2x before gates. Death -> fallbacks per synthesis (SCHED_FIFO
+boost, phase dynamics, HFPLL lock logging).
