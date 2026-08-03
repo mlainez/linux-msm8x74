@@ -1403,3 +1403,16 @@ audit (if R6 still dies): the 176-256 us sleeping ramp window vs load
 steps; OPP current_opp staleness inversions (#3/#4); L2 voteless rail
 floor at hot-trip (#5, needs 88 C). EXP-3 (thermal-on subcap flips,
 sickness meter live) running on R5 meanwhile.
+
+## EXP-3: SURVIVED (450/450 transitions, thermal ON, sub-cap flips, pwrirq=0)
+Matrix complete: EXP-1 fullspan+thermal = dead ~163 s (x2); EXP-2
+fullspan no-thermal = survived (heat-guard end, SICK: pwr_irq at flips
+7-11); EXP-3 subcap+thermal = survived 450/450, ZERO sickness. The
+pwr_irq degradation tracks rail-swing AMPLITUDE (800<->1120 sickens,
+800<->955 does not; HFPLL relock identical in both = exonerated).
+Only cap-vs-target collision kills. EXP-4 (sdhci unbind) held in
+reserve per Marc's controller question - moot if R6 survives.
+R6 = 04b989cb2347 (int/d3 + spm-vsel-integrity) flashing; killer test
+predictions pre-registered: (a) survival; (b) ideally now-VISIBLE
+"timeout setting the voltage" dmesg lines + pwr_irq sickness during
+the run (the fix lets the deferred printk flush) = full confirmation.
