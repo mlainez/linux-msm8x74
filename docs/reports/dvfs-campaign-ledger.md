@@ -1416,3 +1416,41 @@ R6 = 04b989cb2347 (int/d3 + spm-vsel-integrity) flashing; killer test
 predictions pre-registered: (a) survival; (b) ideally now-VISIBLE
 "timeout setting the voltage" dmesg lines + pwr_irq sickness during
 the run (the fix lets the deferred printk flush) = full confirmation.
+
+## R6 KILLER TEST: SURVIVED 450/450 (11x death horizon) — vsel fix validated
+Full killer (3x spin@960 + policy0 300<->2265.6/4s, thermal ON, collision
+verified live: cap clamping 2265.6->1267/1574/1728 for the entire back
+half, zones to 83 C): SURVIVED all 450 transitions. R5 died twice at ~40.
+Single variable = spm-vsel-integrity (c1076b55dd05). ATTRIBUTION CAVEAT
+(pre-registered middle outcome): zero "timeout setting the voltage" msgs
+= no handshake timeout observed; empirical validation strong (one merge,
+11x), microscopic account not fully pinned. ALSO: no pwr_irq sickness
+during the run (R5 sickened by flip 11 under LESS stress); sickness
+appeared ~15 s AFTER the run ended, at post-load idle (schedutil full-
+span hops on hot device) - same pattern as R5 post-EXP-3. mmc1 =EMPTY SD
+SLOT (card:none; rootfs on mmc0 which is pristine) -> canary demoted to
+harmless sensor. Open: why does the empty slot FSM slow under big swings;
+why no sickness during the run but promptly at post-run idle.
+2026-08-03 afternoon events: R6 recharge boot showed charger NOT
+engaging (Discharging, chg-fast never fired, replug seen but no charge
+cycle started); one unexplained ORDERLY stop (clean-stop marker, no
+commander) + one mid-boot reset (pre-registry, likely brownout on 3.7 V
+non-charging pack). Old pack at 14% -> moved to oracle (charging, oracle
+reports input as AC). Full pack (4.32 V) swapped into DUT; swap boot
+correctly registered poff=0x2000 (battery-pull signature).
+STATUS: idle gate R6 running autonomously (phase P0-idle-gate-R6, no
+moving parts: soak-logger + BOOTS only; verdict = uptime + log on
+session resume).
+NEW MANDATE (Marc): charger must engage whenever cable is present -
+smbb engagement defect promoted to active item, fix BY THE METHODOLOGY:
+1) vendor source: qpnp-charger insertion/engagement path (APSD, VIN_MIN,
+   chg_gone/uvd handling, boot-with-cable vs runtime insertion);
+2) live oracle: engagement sequence + charger-type detection (AC vs USB;
+   note "AC powered: true" on oracle - input detection may be the fork);
+3) own tree: qcom_smbb.c engagement conditions incl. why boot-with-cable
+   engaged on R3b/R4 but not on today's R6 boots (100% pack = ambiguous,
+   3.7 V pack = genuine failure);
+4) upstream history for qcom_smbb fixes.
+Fix gets its own plug/unplug validation suite (bench rules from the
+reverted 937177edfdce attempt apply: silicon-verified bit semantics,
+insertion-guarded handlers).
