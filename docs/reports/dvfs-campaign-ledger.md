@@ -1330,3 +1330,22 @@ Decisive single-variable discriminator to run FIRST: PA with the rail
 HELD at max (pin one sibling policy min_freq at 2265.6 so the aggregate
 never drops below 1060 mV) — frequency swings continue, voltage swings
 stop. Survival ⇒ the race is in the VOLTAGE path; death ⇒ clock path.
+
+## R5 EVIDENCE DISCARDED per Marc; clean retest running; PON ambiguity found
+Marc's objection sustained: the R5 conclusions (EXP-1 283 s death AND the
+"idle death at 07:33") are contaminated - devmem reads of the APC block
+were performed on those boots (the /dev/mem XPU hazard class; Marc also
+observed a devmem-triggered reset), and the DUT clock was wrong until
+07:35, making the timeline reconstruction unreliable. ALL R5 verdicts
+discarded.
+NEW FACT from the retest reboot: a deliberate soft `reboot` ALSO leaves
+pon=0x11 warm_reset=0x0002 poff=0x0002 - identical to what was being
+read as the silent-death signature. PON alone cannot distinguish an
+orderly kernel reboot from the silent reset. Registry now writes a
+clean-stop marker at orderly shutdown (soak-logger S90 stop hook,
+committed c96b1812+); a boot with no matching clean-stop ended uncleanly.
+Retest protocol (running): clean reboot -> clock synced at boot -> APC
+verified from kernel boot print ONLY (zero devmem this and all future
+test boots) -> 60 min untouched idle window (soak-logger v2 sole
+recorder) -> EXP-1 via exp-run singleton. Judgment: BOOTS registry +
+uptime-anchored logs only.
