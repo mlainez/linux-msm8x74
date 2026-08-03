@@ -1349,3 +1349,26 @@ verified from kernel boot print ONLY (zero devmem this and all future
 test boots) -> 60 min untouched idle window (soak-logger v2 sole
 recorder) -> EXP-1 via exp-run singleton. Judgment: BOOTS registry +
 uptime-anchored logs only.
+
+## EXP-2 VERDICT: THERMAL-LIMIT PATH INDICTED (clean, pre-registered)
+EXP-2 (PA killer, CPU thermal zones disabled, own 95C guard, clean boot,
+verified load, singleton): survived to flip 106 (212 full-span loaded
+transitions, ~850 s) = 5.3x past the flip-20/165 s death point where BOTH
+thermal-enabled runs died on schedule. Ended by its own heat guard
+(zone6 96C) - NOT a reset; restore path worked (zones re-enabled, load
+killed, device alive, cooling).
+Extremes tolerated without thermal caps: zone temps to ~102C, VBAT sag
+to 3.58 V Discharging under unthrottled 4-core+flip load - no reset.
+Combined with history (staircase alone under steady max load = fine;
+43-min record), the mechanism is the INTERACTION: thermal cap updates
+colliding with in-flight transitions on the same policy.
+Also: Marc spotted sdhci_msm mmc1 pwr_irq timeouts DURING the loaded
+flip phase (flips 7-11, none at idle) on a clean boot - first observable
+precursor: PMIC/SPMI power-control handshakes degrade under rail-swing
+load; PS_HOLD death is PMIC-mediated. Add pwr_irq count to soak-logger.
+Next: (1) check CONFIG_PSTORE_FTRACE availability for a death X-ray
+(ftrace into ramoops survives the reset); (2) EXP-3 discriminator:
+thermal ON, flips 300<->1267.2 (below any staircase cap -> no
+limit-vs-target collision, rail still swings under load): survival past
+the thermal zone = collision confirmed; death = capped-operation
+electrical pattern. Then the code hunt in cpufreq/QoS/step_wise.
