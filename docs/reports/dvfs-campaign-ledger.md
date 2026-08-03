@@ -1372,3 +1372,34 @@ thermal ON, flips 300<->1267.2 (below any staircase cap -> no
 limit-vs-target collision, rail still swings under load): survival past
 the thermal zone = collision confirmed; death = capped-operation
 electrical pattern. Then the code hunt in cpufreq/QoS/step_wise.
+
+## Code-hunt verdict + THE FIX: spm vsel cache poisoning (R6)
+Deep code audit (both cpufreq paths, OPP, regulator, SPM, thermal):
+per-policy serialization is airtight (policy->rwsem both paths; no
+same-policy A/B interleave); regulator max-aggregation is correct; NO
+cross-policy undershoot in the vote logic. The bug found instead:
+**spm_set_voltage_sel commits drv->volt_sel (the get_voltage_sel cache)
+BEFORE the PMIC handshake and never rolls it back on -ETIMEDOUT.** One
+timed-out write -> regulator core retries the identical request ->
+retry compares against the poisoned cache -> "already there" -> success
+WITHOUT hardware write, WITHOUT ramp delay -> OPP raises the CPU clock
+against a rail that never moved -> silent PS_HOLD. The cache stays
+wrong until reboot (persistent-degradation shape). The timeout print is
+deferred (printk under preempt_disable) and the brownout follows within
+the same transition -> the message never flushes -> matches the
+zero-trace signature of every death. Thermal staircase multiplies
+transitions up to 16-64x/s (250 ms polls x 4 zones, one step_wise step
+each) -> multiplies the dice rolls -> explains thermal-on dying 5x
+faster (EXP-2). pwr_irq canary = independent evidence the PMIC-comm
+path degrades under rail-swing stress (16 timeouts persisting into
+idle before the idle death).
+FIX (6.12/topic/spm-vsel-integrity c1076b55dd05, stacked on
+spm-gangrail): volt_sel_req = the request (input to set_vdd);
+volt_sel = last CONFIRMED selector, committed only after the PMIC
+handshake, both v1.1 and v2.1 writers; probe seeds both. A failed
+write now leaves an honest cache -> the retry really writes.
+R6 = int/d3 + this fix, building. Secondary candidates kept from the
+audit (if R6 still dies): the 176-256 us sleeping ramp window vs load
+steps; OPP current_opp staleness inversions (#3/#4); L2 voteless rail
+floor at hot-trip (#5, needs 88 C). EXP-3 (thermal-on subcap flips,
+sickness meter live) running on R5 meanwhile.
