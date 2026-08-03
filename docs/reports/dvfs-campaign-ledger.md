@@ -1306,3 +1306,27 @@ EXP-1 pre-registration (on R5): PA replica (3x spin@960 + policy0
 1800 s / 450 transitions = >10x baseline -> hypothesis confirmed, then
 repeat 2x before gates. Death -> fallbacks per synthesis (SCHED_FIFO
 boost, phase dynamics, HFPLL lock logging).
+
+## EXP-1 on R5: DEATH at ~283 s — APC hypothesis REFUTED as sole mechanism
+R5 (krait-apc live, registers verified programmed at boot: MODE=0x21,
+DLY=0x30430600, MDD 0x190/0x2, GCC 0x0308736E) died the PA killer at
+~283 s into the phase (baseline 162 s / <60 s). Silent PS_HOLD again:
+next boot pon=0x11 warm_reset=0x0002 poff=0x0002, no console output.
+NEAR-MISS METHODOLOGY NOTE: the death was almost misread as "script
+mysteriously stopped": the reboot fit between two 30-s watcher pings,
+fakeclock+no-NTP scrambled wall time (chrony has no reference on the
+host-only gadget net), and the fresh boot's soak-logger + default
+governors mimicked a continuously-alive system. Resolved by CONTENT:
+PON warm_reset=0x0002 on the current boot, two distinct boot_ids in
+/root/soak, and policy time_in_state age == current uptime (proving
+EXP-1 never ran in the current boot). Rule reaffirmed: never trust DUT
+wall time; judge boots by PON + boot_id + uptime-anchored logs.
+Verdict: keep krait-apc (vendor-mandatory, correct; 283 vs 162 s single
+draws suggest margin, not cure) but the killer has another layer. Next
+per pre-registered fallbacks: (a) SCHED_FIFO/target-CPU transition
+execution (vendor I9), (b) phase/load dynamics (I1/I10), (c) HFPLL
+lock-failure logging (I7), (d) voltage-sequencing overlap (I6).
+Decisive single-variable discriminator to run FIRST: PA with the rail
+HELD at max (pin one sibling policy min_freq at 2265.6 so the aggregate
+never drops below 1060 mV) — frequency swings continue, voltage swings
+stop. Survival ⇒ the race is in the VOLTAGE path; death ⇒ clock path.
