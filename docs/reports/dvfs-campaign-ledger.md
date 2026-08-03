@@ -1490,3 +1490,32 @@ REMAINING for §1.1 on R7: killer replication on R7 (R6-validated content
 overnight load soak, staging merge. Charger tier-2 (engagement watchdog,
 EOC re-arm, trickle workaround, REV_BST corrected) = next topic, with
 the plug/unplug validation suite.
+
+## 2026-08-03 night post-mortem: verdict-run conviction RETRACTED (single-
+## draw trap); oracle pack = physical suspect; R7 KILLER REPLICATION BANKED
+Honesty first: the batif verdict run (66 min clean) was ONE draw from a
+heavy-tailed process and I closed the case on it. The night refutes it:
+3 more poff=0x2000 deaths on R7 WITH the batif fix, all on the oracle
+pack. batif-safety stays (vendor-mandatory, real hazard) but was not
+this pack's death mechanism.
+Night timeline (registry + per-boot logs, evidence secured at
+~/Projects/msm8974-scratch/evidence-night-20260804/):
+1. Verdict boot: 2h07 clean idle, then died ~60 s after killer-
+   replication launch attempt 1 (17:33). The reboot fit inside a 3-min
+   command gap; attempt 2 unknowingly ran on the fresh boot. Death
+   MISSED LIVE again - ops rule: after ANY anomalous result (e.g.
+   launcher reporting idle unexpectedly) read BOOTS first.
+2. Next boot: **KILLER REPLICATION PASSED 450/450 ON R7** (second
+   independent full-span survival; §1.1 killer gate on final content =
+   BANKED) + night-soak P0 65-min idle PASSED + PA phase survived + 3/4
+   PB phases; died mid-PB at up 7589 (pwrirq=23 sickness onset earlier).
+3. One idle death at ~17 min (pwrirq=11 on an idle-only boot).
+KEY FACT: since the vsel fix, the kernel signature (poff=0x0002 PS_HOLD)
+has NOT appeared once - two full killer runs, gates, soak phases. Every
+death since = battery family (0x2000), every one = oracle pack in DUT
+bay. Pack runs all day in oracle; old pack never died in DUT. Surviving
+hypothesis: PHYSICAL (contact fit / protection module vs marginal
+contact) - this pack x this bay.
+DECISION (Marc): oracle pack quarantined for DUT use; overnight soak
+re-runs tomorrow (daytime, supervised) on the old pack. Remaining §1.1:
+the uninterrupted long load soak only.
