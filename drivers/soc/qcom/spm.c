@@ -100,7 +100,17 @@ struct spm_driver_data {
 	void __iomem *reg_base;
 	const struct spm_reg_data *reg_data;
 	struct device *dev;
+	/*
+	 * volt_sel_req is the selector a set_vdd() call must program;
+	 * volt_sel is the last selector CONFIRMED by the PMIC handshake and
+	 * is what get_voltage_sel() reports.  They must stay separate: if a
+	 * failed write updated volt_sel, the regulator core's retry would
+	 * compare the request against the poisoned cache, skip the hardware
+	 * write AND the ramp delay, and report success - after which the OPP
+	 * core raises the CPU clock against a rail that never moved.
+	 */
 	unsigned int volt_sel;
+	unsigned int volt_sel_req;
 	int reg_cpu;
 	/*
 	 * set_vdd() cannot return a value (it is an smp_call_func_t), so it
@@ -381,7 +391,7 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
 
-	drv->volt_sel = selector;
+	drv->volt_sel_req = selector;
 	drv->set_vdd_ret = 0;
 
 	if (drv->reg_cpu >= 0) {
@@ -439,7 +449,7 @@ static void smp_set_vdd_v1_1(void *data)
 	unsigned int vlevel, volt_sel;
 	bool avs_enabled;
 
-	volt_sel = drv->volt_sel;
+	volt_sel = drv->volt_sel_req;
 	vlevel = volt_sel | 0x80; /* band */
 
 	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
@@ -474,6 +484,7 @@ static void smp_set_vdd_v1_1(void *data)
 		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n", sts, vlevel);
 		goto enable_avs;
 	}
+	drv->volt_sel = volt_sel;
 
 	if (avs_enabled) {
 		unsigned int max_avs = volt_sel;
@@ -528,7 +539,7 @@ static void smp_set_vdd_v2_1_l2(void *data)
 	unsigned int vlevel, volt_sel;
 	bool avs_enabled;
 
-	volt_sel = drv->volt_sel;
+	volt_sel = drv->volt_sel_req;
 	vlevel = volt_sel;
 
 	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
@@ -579,6 +590,7 @@ static void smp_set_vdd_v2_1_l2(void *data)
 	 * hardware to track the shared Krait rail down to an arbitrary level
 	 * with no software involvement.
 	 */
+	drv->volt_sel = volt_sel;
 	drv->set_vdd_ret = 0;
 }
 
@@ -654,6 +666,7 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		dev_err(dev, "Initial uV value out of bounds\n");
 		return ret;
 	}
+	drv->volt_sel_req = drv->volt_sel;
 
 	/*
 	 * Program initial voltage to hardware so the SAW2 VCTL register
