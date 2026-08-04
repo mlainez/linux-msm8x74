@@ -1709,3 +1709,65 @@ INSTRUMENTATION FIX: `S90soak-logger restart` used to write the
 clean-shutdown marker, which made this genuine silent reset look like an
 orderly reboot in the first read of the post-mortem. Restart no longer
 forges the marker.
+
+## 2026-08-04 WALL PROTOCOL on the pwr_irq anomaly: ROOT-CAUSED (4 authorities)
+Marc's call: stop treating the sdhci pwr_irq timeouts as noise, treat them
+as a symptom. Four parallel authority reads settled it.
+
+MECHANISM (upstream-attested, c0309b3803fe): PWR_IRQ is a pure register-bit
+TRANSITION handshake in the SDCC power-control block. It has NOTHING to do
+with card presence and NOTHING to do with whether vmmc/vqmmc actually
+switch (the regulators are touched inside the handler, after the IRQ). The
+only way the ack never arrives is a write that does not change the bit.
+Worse, the driver's shadow state (curr_pwr_state/curr_io_level) is updated
+ONLY inside the IRQ handler, so once one ack is missed the shadow desyncs
+from hardware permanently and every later cycle times out - the
+self-sustaining burst. req 8 (IO_HIGH) is a CONSEQUENCE of req 2 (BUS_ON)
+failing: only the BUS_ON branch sets curr_io_level. Chase BUS_ON only.
+WHY FP2 SPECIFICALLY: no cd-gpios -> SDHCI_QUIRK_BROKEN_CARD_DETECTION
+turns into MMC_CAP_NEEDS_POLL and sdhci_get_cd() returns 1
+unconditionally, so mmc_rescan powers up an EMPTY slot at up to 4x/s
+(freqs 400/300/200/100 kHz), each attempt blocking mmc_claim_host for the
+full 5 s timeout. There is also an MSM8974-specific defect (the controller
+does not clear the reset bit when reset with no card - 9718f84b8539) whose
+quirk was REMOVED upstream in v4.18 to fix apq8096; devices with cd-gpios
+never notice because they never power an empty slot.
+NOT OURS: the slot was enabled upstream in 2017 (6e2797bd8000, Luca Weiss)
+and our fork's diff over stable/linux-6.12.y touches NOTHING in
+drivers/mmc, drivers/regulator, drivers/spmi or the SDCC clocks (empty
+diff, verified). Sibling ports carry no patch either; Sony (same SoC, same
+l21/l13 rails) differs ONLY by cd-gpios = <&tlmm 62 GPIO_ACTIVE_LOW> plus
+a cd-pins group; klte/hlte are in our polling configuration and must emit
+the same warnings; hammerhead/klte use sdhc_2 for SDIO wifi (non-removable).
+ORACLE: with no card the vendor issues exactly TWO power transactions at
+probe, disables both rails (0 uA), gates the AHB clock, runtime-suspends
+the controller and never touches it again. Zero pwr_irq/pwrctl timeouts in
+dmesg or last_kmsg, ever. Its DT routes CD to msmgpio 62 (status_irq).
+FIX (upstream-endorsed shape - every accepted resolution is either a DT CD
+fix or a driver fix removing a false wait): 6.12/topic/sdhc-carddetect
+adds cd-gpios = <&tlmm 62 GPIO_ACTIVE_LOW> + the cd-pins group, matching
+Sony verbatim. CAVEATS recorded in the commit: verify polarity on FP2
+hardware, and klte documents that a CD GPIO regressed boot-time card init
+there, so re-test with a card inserted.
+RETRACTION: my "interrupt-storm latency causes the timeouts" theory is
+REFUTED. Clock gating is ruled out (mmc_claim_host does
+pm_runtime_get_sync) and a 5 s timeout is not a latency artifact. The
+observed onset correlation with the tsens bursts (bursts at 789-816 s,
+timeouts from 823 s) is unexplained and may be coincidence - I over-read
+it. Also retracted earlier the same day: the "chronic 10 kHz tsens storm"
+(that measurement followed my own zone disable/enable and was an artifact).
+STILL OPEN AND SEPARATE: (a) the tsens interrupt BURSTS are real on a clean
+boot - mean 371/s, peaks 6157 and 7945/s, 13 of 77 samples - and the
+thermal governor never settles (8 distinct caps, oscillating 1036.8 <->
+1190.4 MHz sample after sample at 84-87 C); the driver's own comment says
+there is only ONE interrupt control register for all 11 sensors and
+monitoring more than one yields inconsistent results, but that constraint
+is applied only to VER_0, not the VER_0_1 that msm8974 uses - prime
+suspect for the bursts. (b) EXP-D (vanilla no-DVFS build on THIS DUT) is
+still the missing control for every "did our work cause it" question.
+NEW INSTRUMENT: 6.12/topic/spm-vsel-stats counts rail-handshake writes and
+timeouts and exposes them in debugfs, so "did a rail write ever fail during
+this run" has an answer that survives what a preempt-disabled printk does
+not. This replaces the SD canary the CD fix removes, and measures the
+quantity directly rather than by proxy.
+R15 = card detect; R16 = + rail counters.
