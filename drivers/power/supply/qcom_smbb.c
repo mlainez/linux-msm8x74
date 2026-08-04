@@ -505,8 +505,21 @@ static void smbb_hw_state(struct smbb_charger *chg, bool *input,
 	if (!chg->dc_disabled)
 		regmap_read(chg->regmap, chg->addr + SMBB_DC_RT_STS, &dc);
 
+	/*
+	 * CHG_GONE is the signal that matters when a cable is pulled: this
+	 * hardware keeps USB_RT_VALID asserted and even leaves the
+	 * fast-charge bit set after the input is physically gone, and only
+	 * raises CHG_GONE.  Measured on a Fairphone 2: across an unplug the
+	 * only register change was USB_RT_STS 0x03 -> 0x07 while the battery
+	 * visibly took over the load.  Treating the stale bits as truth would
+	 * make the supervisor believe a cycle is running and skip the re-arm
+	 * it exists to perform.
+	 */
+	if (usb & USB_RT_CHG_GONE)
+		usb &= ~USB_RT_VALID;
+
 	*input = (usb & USB_RT_VALID) || (dc & DC_RT_VALID);
-	*charging = chgr & (CHG_RT_FAST_ON | CHG_RT_TRKL_ON);
+	*charging = *input && (chgr & (CHG_RT_FAST_ON | CHG_RT_TRKL_ON));
 	*bat_ready = (bat & BAT_RT_PRESENT) && (bat & BAT_RT_TEMP_OK);
 }
 
