@@ -79,6 +79,9 @@
 #define SMBB_CHG_VBAT_DET	0x05d
 #define SMBB_CHG_TCHG_MAX_EN	0x060
 #define TCHG_MAX_EN		BIT(7)
+#define SMBB_CHG_TCHG_MAX	0x061
+/* register counts in 4-minute units, biased by one */
+#define TCHG_MAX_MINUTES(m)	((m) / 4 - 1)
 #define SMBB_CHG_WDOG_TIME	0x062
 #define SMBB_CHG_WDOG_EN	0x065
 #define WDOG_EN			BIT(7)
@@ -175,6 +178,20 @@ struct smbb_charger {
 	unsigned int rearm_count;
 	unsigned int gate_clear_count;
 	bool was_charging;
+
+	/*
+	 * Adaptive input current limit.  The vendor driver never programs the
+	 * configured input limit outright: it starts at 100/500 mA and lets
+	 * the limit settle upward, so a marginal supply or cable is not asked
+	 * for more than it can hold.  Mirror that with a ramp that backs off
+	 * whenever the input actually collapses.
+	 */
+	unsigned int iusb_idx;		/* limit currently programmed */
+	unsigned int iusb_floor_idx;	/* ramp starts here after insertion */
+	unsigned int iusb_max_idx;	/* configured ceiling (from DT) */
+	unsigned int iusb_learn_idx;	/* ceiling learned from a collapse */
+	unsigned int collapse_count;
+	bool collapse_pending;
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
@@ -523,6 +540,23 @@ static void smbb_hw_state(struct smbb_charger *chg, bool *input,
 	*bat_ready = (bat & BAT_RT_PRESENT) && (bat & BAT_RT_TEMP_OK);
 }
 
+/* 500 mA: what a USB host port is required to supply, and the vendor's
+ * fallback limit before its input-current limit has settled.
+ */
+#define SMBB_IUSB_FLOOR_UA	500000
+
+static void smbb_set_iusb(struct smbb_charger *chg, unsigned int idx)
+{
+	if (idx > chg->iusb_learn_idx)
+		idx = chg->iusb_learn_idx;
+	if (idx == chg->iusb_idx)
+		return;
+	if (regmap_write(chg->regmap, chg->addr + SMBB_USB_IMAX, idx))
+		return;
+	chg->iusb_idx = idx;
+	dev_dbg(chg->dev, "input limit %u uA\n", smbb_imax_fn(idx));
+}
+
 static void smbb_engage_work(struct work_struct *work)
 {
 	struct smbb_charger *chg = container_of(work, struct smbb_charger,
@@ -533,6 +567,13 @@ static void smbb_engage_work(struct work_struct *work)
 	smbb_hw_state(chg, &input, &charging, &bat_ready);
 
 	if (!input) {
+		/*
+		 * Cable gone: forget what was learned about this supply and
+		 * start the next insertion from the floor again.
+		 */
+		chg->iusb_learn_idx = chg->iusb_max_idx;
+		chg->collapse_pending = false;
+		smbb_set_iusb(chg, chg->iusb_floor_idx);
 		chg->rearm_stage = 0;
 		if (chg->was_charging) {
 			dev_dbg(chg->dev, "input gone, supervisor idle\n");
@@ -548,6 +589,27 @@ static void smbb_engage_work(struct work_struct *work)
 	}
 
 	smbb_clear_gates(chg);
+
+	/*
+	 * The input collapsed while it was still nominally present: the
+	 * supply cannot hold what we are drawing.  Learn a lower ceiling and
+	 * stay below it for as long as this cable remains plugged in.
+	 */
+	if (chg->collapse_pending) {
+		chg->collapse_pending = false;
+		chg->collapse_count++;
+		if (chg->iusb_idx > chg->iusb_floor_idx) {
+			chg->iusb_learn_idx = chg->iusb_idx - 1;
+			dev_info(chg->dev,
+				 "input collapsed at %u uA, limiting to %u uA\n",
+				 smbb_imax_fn(chg->iusb_idx),
+				 smbb_imax_fn(chg->iusb_learn_idx));
+			smbb_set_iusb(chg, chg->iusb_learn_idx);
+		}
+	} else if (charging && chg->iusb_idx < chg->iusb_learn_idx) {
+		/* holding up under the current draw: ask for one step more */
+		smbb_set_iusb(chg, chg->iusb_idx + 1);
+	}
 
 	switch (chg->rearm_stage) {
 	case 1:
@@ -668,6 +730,12 @@ static irqreturn_t smbb_chg_gone_handler(int irq, void *_data)
 	struct smbb_charger *chg = _data;
 
 	smbb_set_line_flag(chg, irq, STATUS_CHG_GONE);
+	/*
+	 * Let the supervisor decide what this was: with the input still
+	 * valid it is a collapse (back off the input limit), without it it is
+	 * just a cable being pulled.
+	 */
+	chg->collapse_pending = true;
 	power_supply_changed(chg->bat_psy);
 	power_supply_changed(chg->usb_psy);
 	if (!chg->dc_disabled)
@@ -951,8 +1019,15 @@ static const struct reg_off_mask_default {
 	/* The bootloader is supposed to set this... make sure anyway. */
 	{ SMBB_MISC_BOOT_DONE, BOOT_DONE, BOOT_DONE },
 
-	/* Disable software timer */
-	{ SMBB_CHG_TCHG_MAX_EN, TCHG_MAX_EN, 0 },
+	/*
+	 * Bound a charge cycle, as the vendor does (its DT asks for 150
+	 * minutes on this board).  A cycle that runs longer than that is a
+	 * fault, not a slow charge; the hardware latches CHG_FAILED and the
+	 * supervisor clears it and re-arms, which is also what the vendor
+	 * does from its chg-failed handler.
+	 */
+	{ SMBB_CHG_TCHG_MAX, 0xff, TCHG_MAX_MINUTES(150), 0, true },
+	{ SMBB_CHG_TCHG_MAX_EN, TCHG_MAX_EN, TCHG_MAX_EN },
 
 	/* Clear and disable watchdog */
 	{ SMBB_CHG_WDOG_TIME, 0xff, 160 },
@@ -1051,6 +1126,8 @@ static const struct {
 	{ "btc_ctrl",     SMBB_BAT_BTC_CTRL },
 	{ "vref_thm",     SMBB_BAT_VREF_THM_CTRL },
 	{ "usb_imax",     SMBB_USB_IMAX },
+	{ "tchg_max",     SMBB_CHG_TCHG_MAX },
+	{ "tchg_max_en",  SMBB_CHG_TCHG_MAX_EN },
 	{ "usb_susp",     SMBB_USB_SUSP },
 	{ "usb_otg_ctl",  SMBB_USB_OTG_CTL },
 };
@@ -1087,6 +1164,11 @@ static int smbb_state_show(struct seq_file *s, void *data)
 	smbb_hw_state(chg, &input, &charging, &bat_ready);
 	seq_printf(s, "hardware      input=%d charging=%d bat_ready=%d\n",
 		   input, charging, bat_ready);
+	seq_printf(s, "input limit   %u uA (floor %u, ceiling %u, learned %u, collapses %u)\n",
+		   smbb_imax_fn(chg->iusb_idx),
+		   smbb_imax_fn(chg->iusb_floor_idx),
+		   smbb_imax_fn(chg->iusb_max_idx),
+		   smbb_imax_fn(chg->iusb_learn_idx), chg->collapse_count);
 
 	for (i = 0; i < ARRAY_SIZE(smbb_debug_regs); ++i) {
 		rc = regmap_read(chg->regmap,
@@ -1334,6 +1416,20 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	 * driver on this board.  See the BPD/VREF entries in the setup
 	 * table for why arming comparators here is unsafe.
 	 */
+
+	/*
+	 * Start the input limit at the floor and let the supervisor ramp it
+	 * up.  chg->attr[] holds the configured limit, which becomes the
+	 * ceiling rather than the value programmed at probe.
+	 */
+	chg->iusb_max_idx = smbb_hw_lookup(chg->attr[ATTR_USBIN_IMAX],
+					   smbb_imax_fn);
+	chg->iusb_floor_idx = min(smbb_hw_lookup(SMBB_IUSB_FLOOR_UA,
+						 smbb_imax_fn),
+				  chg->iusb_max_idx);
+	chg->iusb_learn_idx = chg->iusb_max_idx;
+	chg->iusb_idx = chg->iusb_max_idx + 1;	/* force the first write */
+	smbb_set_iusb(chg, chg->iusb_floor_idx);
 
 	/*
 	 * Clear the sticky gates before the setup table enables charging:
