@@ -179,3 +179,32 @@
 &smbb {
 	qcom,minimum-input-voltage = <4300000>;
 };
+
+/*
+ * XPU-violation err-fatal is deliberately NOT armed on this fixture.
+ *
+ * qcom-msm8974.dtsi sets qcom,xpu-err-fatal so TrustZone treats an XPU
+ * permission violation as fatal, matching the vendor (Android arms it
+ * unconditionally in scm-xpu.c).  Measured on this rig 2026-08-04, that is what
+ * kills it once the radios are up: two PS_HOLD deaths in ~16 min of idle, with
+ * ramoops trails showing all four cores parked at 300 MHz, the gang rail static
+ * (vdd_writes frozen, vdd_timeouts 0, volt_sel == volt_sel_req), 65 C and 4.9 V
+ * - i.e. the kernel doing nothing, and TZ resetting the SoC anyway.  Disarming
+ * it ran 43 min idle and 40 min of four-core load at 86-88 C without a reset.
+ *
+ * The violation itself is NOT ours and is not fixed by this: mainline commits it
+ * silently because mainline never arms the fatal behaviour.  What our arming did
+ * was turn a tolerated fault into a reset.  The remaining work is to identify the
+ * violating master and region - the radios DMA into the carveouts, and TZ records
+ * the offender in its diag region at 0xfe805720 (vendor tz_log), which mainline
+ * does not map.
+ *
+ * The err-fatal call was originally added on the theory that the unarmed SBL
+ * default silently PS_HOLD-resets under multi-core load.  That no longer
+ * reproduces: 40 min of loaded soak with it disarmed was clean, most plausibly
+ * because the real cause was the SPM vsel cache poisoning fixed in c1076b55dd05.
+ * Left in place for the phone, where it has not been retested with a battery.
+ */
+&{/firmware/scm} {
+	/delete-property/ qcom,xpu-err-fatal;
+};
