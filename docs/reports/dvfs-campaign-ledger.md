@@ -1633,3 +1633,36 @@ ORDER for boot sequence, and the clean-stop marker to tell deliberate
 reboots from faults. Helper ~/Projects/msm8974-scratch/dut-sync-clock.sh
 syncs the clock and clears the phase marker; watcher loops call it on
 every observed return from a reset.
+
+## REQUIREMENT (Marc, 2026-08-04): the carrier-board rig must be supported
+Rig hardware: 5 V fed to the battery connector's + and - pins ONLY. No
+thermistor, no ID resistor. This configuration works on the vendor stack
+(Android / LineageOS), so our driver must support it too, without harming
+the rig or the device.
+Consequences for qcom_smbb as of R13 (analysis, not yet coded):
+ - VBAT_SNS reads ~5 V, i.e. ABOVE vmax (4.35 V) and above the recharge
+   threshold, so smbb_battery_full() returns true -> no re-arm. Safe, but
+   only incidentally: it must be explicit, not a side effect of 5 V.
+ - Presence: we select thermistor-based BPD (vendor default). With no
+   thermistor the PMIC reports battery ABSENT -> bat_ready false -> the
+   supervisor never enables a cycle. Also safe, and the vendor relies on
+   the same behaviour (its charge_en() is a no-op once insertion_ocv_uv
+   is 0), which is why the rig works on Android.
+ - Battery temperature: an open thermistor line sits near VDD_VADC, above
+   the top of the ported mapping table, so the lookup CLAMPS to the
+   coldest entry (-30 C). Harmless today (nothing consumes it), but a
+   future JEITA implementation must treat implausible/absent readings as
+   "refuse to charge" and must NEVER derate upward or raise vddmax.
+ - The safety timer never arms (no cycle starts) and the input-current
+   ramp stays at its 500 mA floor (it only steps up while charging).
+PLANNED (vendor-faithful, both properties exist downstream):
+ 1. qcom,bpd-detection ("bpd_thm" / "bpd_id" / "bpd_thm_id", vendor
+    strings from qpnp-charger.c bpd_label[]) so a board declares which
+    sense line is actually wired instead of the driver assuming one.
+ 2. qcom,charging-disabled (vendor property) so a rig device tree keeps
+    the driver loaded for OTG/reporting while never enabling a cycle -
+    the explicit switch the rig should use.
+ 3. "Battery absent" as a first-class state: no re-arm attempts, no log
+    spam, coherent power-supply reporting for the soak logger.
+Not implemented yet by Marc's instruction (a flash would abort the
+running suspect-pack survival test).
