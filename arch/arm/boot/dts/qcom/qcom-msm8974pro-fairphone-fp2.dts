@@ -5,6 +5,7 @@
 #include <dt-bindings/input/input.h>
 #include <dt-bindings/leds/common.h>
 #include <dt-bindings/pinctrl/qcom,pmic-gpio.h>
+#include <dt-bindings/iio/qcom,spmi-vadc.h>
 
 / {
 	model = "Fairphone 2";
@@ -476,6 +477,14 @@
 	qcom,fast-charge-high-threshold-voltage = <4350000>;
 	qcom,auto-recharge-threshold-voltage = <4240000>;
 	qcom,minimum-input-voltage = <4450000>;
+
+	/*
+	 * Battery sense, so the charger can tell a full battery from a charge
+	 * path that stalled: the hardware reports neither a running cycle nor
+	 * end-of-charge while a full pack sits above the recharge threshold.
+	 */
+	io-channels = <&pm8941_vadc VADC_VBAT_SNS>;
+	io-channel-names = "vbat";
 
 	status = "okay";
 };

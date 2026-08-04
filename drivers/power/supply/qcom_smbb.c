@@ -28,6 +28,7 @@
 #include <linux/regmap.h>
 #include <linux/slab.h>
 #include <linux/extcon-provider.h>
+#include <linux/iio/consumer.h>
 #include <linux/regulator/driver.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
@@ -193,6 +194,14 @@ struct smbb_charger {
 	unsigned int collapse_count;
 	bool collapse_pending;
 	unsigned int rearm_delay_ms;	/* backoff between re-arm attempts */
+
+	/*
+	 * Battery voltage, when the board provides it.  Without it the
+	 * supervisor cannot tell a charge path that needs prodding from a
+	 * battery that is simply full, because the hardware reports neither
+	 * a running cycle nor end-of-charge in that state.
+	 */
+	struct iio_channel *vbat_chan;
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
@@ -560,6 +569,26 @@ static void smbb_set_iusb(struct smbb_charger *chg, unsigned int idx)
 	dev_dbg(chg->dev, "input limit %u uA\n", smbb_imax_fn(idx));
 }
 
+/*
+ * True when the battery sits at or above the auto-recharge threshold, i.e.
+ * the hardware is right to keep the buck off and nothing needs re-arming.
+ * Errs towards "not full" when no channel is available, preserving the
+ * previous behaviour on boards that do not wire one up.
+ */
+static bool smbb_battery_full(struct smbb_charger *chg)
+{
+	int uv, rc;
+
+	if (!chg->vbat_chan)
+		return false;
+
+	rc = iio_read_channel_processed(chg->vbat_chan, &uv);
+	if (rc < 0)
+		return false;
+
+	return uv >= chg->attr[ATTR_CHG_VDET];
+}
+
 static void smbb_engage_work(struct work_struct *work)
 {
 	struct smbb_charger *chg = container_of(work, struct smbb_charger,
@@ -646,7 +675,7 @@ static void smbb_engage_work(struct work_struct *work)
 		 * the vendor does (it re-arms once at end of charge and then
 		 * waits on the comparator).
 		 */
-		if (charging || !bat_ready || done) {
+		if (charging || !bat_ready || done || smbb_battery_full(chg)) {
 			/* running, or the battery is in no state to charge */
 			regmap_update_bits(chg->regmap,
 					   chg->addr + SMBB_CHG_CTRL,
@@ -1189,6 +1218,16 @@ static int smbb_state_show(struct seq_file *s, void *data)
 	smbb_hw_state(chg, &input, &charging, &bat_ready, &done);
 	seq_printf(s, "hardware      input=%d charging=%d bat_ready=%d done=%d\n",
 		   input, charging, bat_ready, done);
+	if (chg->vbat_chan) {
+		int uv;
+
+		if (iio_read_channel_processed(chg->vbat_chan, &uv) >= 0)
+			seq_printf(s, "battery       %d uV (recharge below %u uV, full=%d)\n",
+				   uv, chg->attr[ATTR_CHG_VDET],
+				   uv >= chg->attr[ATTR_CHG_VDET]);
+	} else {
+		seq_puts(s, "battery       no voltage channel\n");
+	}
 	seq_printf(s, "input limit   %u uA (floor %u, ceiling %u, learned %u, collapses %u)\n",
 		   smbb_imax_fn(chg->iusb_idx),
 		   smbb_imax_fn(chg->iusb_floor_idx),
@@ -1441,6 +1480,18 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	 * driver on this board.  See the BPD/VREF entries in the setup
 	 * table for why arming comparators here is unsafe.
 	 */
+
+	/*
+	 * Optional: a battery-voltage channel lets the supervisor recognise a
+	 * full battery instead of retrying against the recharge comparator.
+	 */
+	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
+	if (IS_ERR(chg->vbat_chan)) {
+		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
+		chg->vbat_chan = NULL;
+	}
 
 	/*
 	 * Start the input limit at the floor and let the supervisor ramp it
