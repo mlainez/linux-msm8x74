@@ -1519,3 +1519,48 @@ contact) - this pack x this bay.
 DECISION (Marc): oracle pack quarantined for DUT use; overnight soak
 re-runs tomorrow (daytime, supervised) on the old pack. Remaining §1.1:
 the uninterrupted long load soak only.
+
+## 2026-08-04 daytime soak (GOOD pack, R7): P0 IDLE GATE + KILLER PHASE
+## PASSED; died at the 4-core max-load STEP, battery-only, poff=0x0000
+Ran 95 min, 189 samples (evidence: ~/Projects/msm8974-scratch/
+evidence-soak-20260804/). Banked on the good pack:
+ - **P0 formal idle gate PASSED** (up 169 -> 4023 s = 64.2 min, schedutil,
+   no pins);
+ - **PA killer phase survived**: 660 policy0 full-span transitions with
+   cores 1-3 pinned-loaded at 960 MHz (a third independent survival of
+   the killer face on the fixed kernel);
+ - PB split phases cpu0..cpu3 all survived (asymmetric rail loading).
+DIED within 30 s of PC-maxload starting (1 loaded core -> 4 loaded cores,
+~1.5 W -> ~8 W step): last sample up=5682, load 2.20 (climbing), freqs
+1497/1497/1497/1190, temps jumping 64->83 C, VBAT 4.15 V.
+SIGNATURE IS A THIRD FAMILY: pon=0x10 warm_reset=0x0002 **poff=0x0000** -
+the PMIC recorded NO power-off reason, i.e. it lost its own supply before
+it could latch one (hard VPH collapse), unlike the kernel PS_HOLD
+(poff=0x0002) or the battery/UVLO family (poff=0x2000). Matches the
+input-power-side family documented 2026-08-01 (4-core load 6-8 W vs
+~2.5 W USB input; pack covers the deficit, sags through pack+contact
+impedance, buck loses headroom).
+**KEY CONTEXT: the charger was NOT engaged for the whole soak.** 162/189
+samples Discharging; the only Charging window was ~27 samples mid-PA
+(hardware comparator briefly engaged) and it stopped again. Boot started
+at 4.34 V (full, above the 4.24 V resume threshold -> hardware latched
+done, and our driver has no re-arm - the tier-2 defect), so the device
+ran the entire gate battery-only and hit the biggest current step of the
+suite with zero input support. A real device under load has the charger
+contributing ~a third of the power.
+=> **CHARGER TIER-2 IS RECLASSIFIED AS A PREREQUISITE for the max-load
+gate**, not a later nicety: we cannot honestly validate sustained
+max-load stability while the harness is forced battery-only.
+INSTRUMENTATION BUG FOUND + CORRECTION TO 2026-08-03 NIGHT READING:
+/root/soak/.phase persists across boots, so samples on a boot with NO
+soak running carry the previous boot's stale phase label. Two of last
+night's deaths (d7b9dd2b, ad88ff77) were labelled "PC-maxload-c1" but
+show load 0.16 with all cores at 300 MHz - they were IDLE deaths, not
+load deaths. Fix: soak-logger must reset .phase to "-" at boot.
+NEXT (pre-registered): (1) fix the phase-reset bug; (2) cheap
+single-variable discriminator available NOW - the pack sits ~4.15 V,
+below the 4.24 V threshold, so a reboot with cable in engages charging
+(observed repeatedly); re-run the soak with the charger ENGAGED and see
+whether PC-maxload survives. Survival => input-power mechanism confirmed
+and tier-2 is the fix; death => a genuine SoC-side max-load limit and
+the load phase needs a power ceiling (vendor thermal/BCL-style) instead.
