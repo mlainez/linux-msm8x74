@@ -1,0 +1,146 @@
+// SPDX-License-Identifier: GPL-2.0
+/*
+ * Fairphone 2 mainboard on a carrier board ("the rig"): no battery pack, VPH
+ * fed from a current-limited 5 V bench/USB source through wiring, straight
+ * into the battery terminals.
+ *
+ * This is a bring-up/CI fixture, not a shipping device.  Two things differ from
+ * a phone, and only the second one turned out to matter:
+ *
+ *   no cell across VPH   nothing absorbs a load step.  A pack has ~100 mOhm and
+ *                        a large reservoir, so a phone's supply only has to
+ *                        cover average power; here every step lands on the
+ *                        source and its wiring.
+ *   no panel             the carrier has no display attached.
+ *
+ * The fixture was originally blamed for far more than that.  Boot reset 6/6
+ * times with PON reporting UVLO, first at 8.10 s exactly when the WCNSS pronto
+ * powered up, and stripping the SoC down (radios, display, GPU, one core, a
+ * 652.8 MHz cap) did not fix it.  The actual cause was in our own charger
+ * driver: with no battery detected it held the charge path off, and on this PMIC
+ * the USB input reaches VPH *through* that path, so it removed the board's only
+ * supply.  Mainline, which leaves the path armed at 1.5 A, boots this same
+ * fixture with all three remoteprocs and WLAN up.  With that fixed, the rig runs
+ * four cores across the whole OPP ladder without a collapse - thermal
+ * throttling, not the supply, is what bounds sustained load today.
+ *
+ * So this file is deliberately SMALL: it describes what is physically absent
+ * (panel, battery) and what the fixture's supply can give, and nothing else.
+ * Load shedding lives in userspace (rig-envelope), where it can be changed
+ * without a reflash.  Nothing here may leak into the phone device tree.
+ */
+
+#include "qcom-msm8974pro-fairphone-fp2.dts"
+
+/ {
+	model = "Fairphone 2 (carrier rig, no battery)";
+	/* compatible is inherited: lk2nd matches the board on "fairphone,fp2" */
+};
+
+/*
+ * Radios and GPU are deliberately LEFT ENABLED.
+ *
+ * An earlier version of this file disabled all three remoteprocs, on the
+ * evidence that boot died at 8.10 s exactly when the WCNSS pronto powered up.
+ * That was a misattribution: mainline boots this same fixture with WCNSS, ADSP,
+ * the modem and WLAN firmware all up on the same 1.5 A input (measured
+ * 2026-08-04).  What actually starved the board was our own charger driver
+ * holding the input path off with no battery fitted.  With that fixed there is
+ * no supply reason to strip the SoC down, and keeping the radios on keeps the
+ * fixture representative of a real device - which is the entire point of
+ * validating on it.
+ *
+ * If the concurrent power-up steps ever need spreading out (mainline auto-boots
+ * remoteprocs at probe, whereas Android loads them from userspace on demand),
+ * build the remoteproc drivers as modules and stage them from a service.  Do
+ * not express that as "status = disabled" here: it removes the subsystem from
+ * validation instead of merely sequencing it.
+ */
+
+/*
+ * No panel is attached to the carrier - lk2nd's own DSI init already fails on
+ * it - so MDSS/DSI would only power rails and clock a subsystem that drives
+ * nothing.  This one is a physical fact about the fixture, not a power budget
+ * decision, so it stays.
+ */
+&mdss {
+	status = "disabled";
+};
+
+&mdss_dsi0 {
+	status = "disabled";
+};
+
+&mdss_dsi0_phy {
+	status = "disabled";
+};
+
+/*
+ * The charger node is deliberately left ENABLED and un-disabled here.
+ *
+ * There is no pack to charge, but on this PMIC the USB input reaches VPH
+ * through the charge path, so the charger is how the board is powered at all
+ * when no cell is fitted.  Setting qcom,charging-disabled here (tried
+ * 2026-08-04) removed that supply and the fixture reset on every boot with PON
+ * reporting UVLO; mainline, which leaves the path armed at 1.5 A, boots this
+ * same fixture with all three remoteprocs and WLAN up.  qcom_smbb now keeps
+ * the path armed when an input is present and no battery is detected, which is
+ * also how a phone boots on a charger with a dead pack.
+ */
+
+/*
+ * Supply observability.
+ *
+ * On a fixture with no cell, the two nodes a phone would watch are useless:
+ * VBAT_SNS reads a meaningless ~0.83 V across open battery terminals, and the
+ * PMIC's IADC senses current through the battery path, which carries none
+ * (measured 2026-08-04: raw 10 and 37 at scale 0.001).  What does carry the
+ * whole system is the USB input, so expose USBIN: it is the node that sags when
+ * the port current-limits, and therefore the only honest early warning before
+ * the PMIC latches UVLO.  1:4 pre-scaling is the divider in front of the ADC.
+ */
+&pm8941_vadc {
+	channel@0 {
+		reg = <VADC_USBIN>;
+		qcom,pre-scaling = <1 4>;
+	};
+};
+
+/*
+ * The CPU OPP table is deliberately left INTACT.
+ *
+ * The supply-safe envelope is policy, not a property of the silicon, so it lives
+ * in userspace (rig-envelope), which sets scaling_max_freq from the number of
+ * cores online and lowers it on an input collapse or a USBIN sag.  Keeping the
+ * table complete means the same DTB still describes this fixture when it is fed
+ * from a supply that can source more current - only the policy changes.
+ *
+ * An earlier revision deleted every OPP above 652.8 MHz and justified it with a
+ * budget computed for a 0.9 A feed.  That was measured wrong on 2026-08-04: the
+ * PMIC input path supplies 1.5 A (2.5 A ceiling), and walking the cap to
+ * 2265600 kHz under four-core load produced no collapse at all.  What did bound
+ * the load was the thermal governor, clamping to ~1.0-1.2 GHz at 76 C with the
+ * cpufreq cooling devices at 6/13.  Note the consequence: that bound is a side
+ * effect of this fixture's cooling, so better cooling would let the cores reach
+ * the OPPs where the input budget *does* bind - which is why the userspace caps
+ * are derived from power, not from temperature.
+ */
+
+/*
+ * The input current limit is deliberately NOT overridden here (it stays at the
+ * phone's 1500000 uA).
+ *
+ * Raising it to the PMIC's 2.5 A maximum was tried on 2026-08-04 and made
+ * things worse, not better: the fixture booted cleanly at 1.5 A and reset with
+ * UVLO at 2.5 A.  Asking a host port for more than it can source droops VBUS,
+ * qcom,minimum-input-voltage (4.45 V on this board) then throttles the charge
+ * path to defend that floor, and with no cell to cover the shortfall VPH falls
+ * through UVLO.  Mainline boots this fixture with radios and WLAN up at 1.5 A,
+ * so 1.5 A is the demonstrated figure, not a conservative guess.
+ *
+ * Nor would raising it help the rig's other wiring mode: with the phone port in
+ * host mode there is no USB input at all - the carrier's PD supply feeds VPH
+ * directly at the battery terminals - so IUSB governs nothing there.  The input
+ * limit only ever needs to match the source on the USB connector, and that
+ * source is a host port.
+ */
