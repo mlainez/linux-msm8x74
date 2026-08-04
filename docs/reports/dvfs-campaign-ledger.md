@@ -1564,3 +1564,72 @@ below the 4.24 V threshold, so a reboot with cable in engages charging
 whether PC-maxload survives. Survival => input-power mechanism confirmed
 and tier-2 is the fix; death => a genuine SoC-side max-load limit and
 the load phase needs a power ceiling (vendor thermal/BCL-style) instead.
+
+## 2026-08-04: CHARGER TIER-2 implemented and partially validated (R8..R10)
+Topic 6.12/topic/smbb-engagement, three commits:
+ - 8c8778c4653b "keep the charge path engaged": clear the sticky gates at
+   probe (CTRL_ON_BAT_FORCE 0x1049[0], USB_SUSP 0x1347[0], CHG_FAILED
+   w1c latch 0x104A[7]); engagement supervisor (delayed work: gates +
+   CTRL_EN re-assert every 10 s while input present, two-stage CTRL_EN
+   off->on re-arm when input present + battery ready + no cycle, so the
+   settle delay never blocks a workqueue); vendor trickle-stuck
+   workaround (SEC_ACCESS + CHG_OVR0/CHG_TRICKLE_CLAMP) and the
+   corrected REV_BST write (mainline had it #if 0 with mask/value
+   SWAPPED); setup table gained a "force" flag because
+   regmap_update_bits SKIPS unchanged writes - which is also why
+   enabling charging never produced a fresh edge when the bootloader had
+   already set CTRL_EN (prime suspect for "engages on some boots").
+   Guaranteed edge now via CTRL_EN 1->0->1 in the table.
+ - 130b2daf318a "drive the supervisor from hardware state": the cached
+   status word is maintained by edges that DO NOT always fire here (a
+   full unplug+replug left chg-fast and usb-valid counters at 0 while
+   the cached bits still claimed a running cycle). Supervisor now reads
+   the per-block RT_STS registers (0x010/0x210/0x310/0x410, bits per the
+   DT interrupt list).
+ - 14f117cc2c24 "treat input collapse as no input": MEASURED semantics -
+   on a real cable pull USB_RT_VALID stays set AND chgr fast-charge stays
+   set; only CHG_GONE (usb bit2) is raised (USB_RT_STS 0x03 -> 0x07)
+   while VBAT drops 4.22 -> 4.10 V. So CHG_GONE, not USB_VALID, means
+   "no input". Without this the supervisor would skip needed re-arms.
+DIAGNOSTICS (as requested): driver-owned debugfs
+/sys/kernel/debug/<dev>/state - decodes the cached status word, the
+supervisor counters (rearms/gate_clears/stage), the HARDWARE truth line
+(input/charging/bat_ready) for direct comparison, and 19 named registers.
+Deliberately NOT the generic regmap debugfs (whole-range walk sprays
+refused SPMI reads -> pmic_arb WARN storms, 40+40 seen on 2026-08-03).
+Plus dev_info on every gate clear and cycle start/stop.
+VALIDATED ON DEVICE (R9/R10):
+ - boot with cable at HIGH charge (4.22 V): cycle running ~11-16 s after
+   probe, rearms=1..2 => the cycle exists BECAUSE of the new re-arm.
+   This is the exact case that left R7 Discharging for a 95-min soak.
+ - supervisor does not thrash: rearms frozen while a cycle runs.
+ - unplug mid-charge: NO reset (the failure that killed the first smbb
+   attempt, 937177edfdce, is gone), psy tracks Discharging correctly.
+ - replug: re-engagement within <=2 s. HONEST CAVEAT: no re-arm was
+   needed (hardware restarted it), so this specific pass is not
+   attributable to the patch.
+ - every intended register write verified present via the new debugfs
+   (chg_ctrl 0x80, chg_failed 0x00, usb_susp 0x00, bpd 0x0a, vref 0xc0,
+   vbat_det 0x32=4.24 V, vmax 0x6f=4.35 V, vin_min 0x15=4.45 V).
+STILL OPEN: termination + auto-resume (the case the re-arm exists for) -
+needs the pack to reach 4.35 V; sampler /root/chgwatch.sh (2 s, fsync)
+is running to capture it.
+NOTE (observation, not yet a conclusion): btc_ctrl reads 0x81, i.e. the
+BTC comparators are ENABLED by the boot chain. Yesterday's batif fix did
+not disable them (it only stopped US from arming them and forced the
+VREF bias on). Keep in mind for the idle-death family.
+BUILD LOOP FIXED (Marc): output-fp2/local.mk sets
+LINUX_OVERRIDE_SRCDIR=<wt-int> - no more 8-minute buildroot git fetch +
+re-tar, and the build dir persists (incremental). Provenance moves to
+`git -C wt-int rev-parse HEAD` (the defconfig pin is now documentation).
+CHARGER_QCOM_SMBB switched =y -> =m for a scp+reboot iteration loop;
+note rmmod does NOT work (a built-in consumer holds the otg-vbus
+regulator, refcount 1, "Resource temporarily unavailable"), so the loop
+is scp .ko + reboot (~60 s), not rmmod/insmod. Decide =y vs =m before
+promotion.
+CLOCK/REGISTRY CAVEAT: the BOOTS epoch is written by the logger BEFORE
+the host clock sync lands, so epochs can be fake-clock values; use FILE
+ORDER for boot sequence, and the clean-stop marker to tell deliberate
+reboots from faults. Helper ~/Projects/msm8974-scratch/dut-sync-clock.sh
+syncs the clock and clears the phase marker; watcher loops call it on
+every observed return from a reset.
