@@ -7,6 +7,8 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/debugfs.h>
+#include <linux/seq_file.h>
 #include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/init.h>
@@ -111,6 +113,16 @@ struct spm_driver_data {
 	 */
 	unsigned int volt_sel;
 	unsigned int volt_sel_req;
+	/*
+	 * Counters for the rail handshake, exposed through debugfs.  A failed
+	 * handshake is the one event on this platform that is known to end in
+	 * a silent reset when software then clocks the CPU against a rail that
+	 * did not move, so it must be countable rather than only appearing as
+	 * a rate-limited log line.
+	 */
+	unsigned int vdd_writes;
+	unsigned int vdd_timeouts;
+	struct dentry *debugfs;
 	int reg_cpu;
 	/*
 	 * set_vdd() cannot return a value (it is an smp_call_func_t), so it
@@ -393,6 +405,7 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 
 	drv->volt_sel_req = selector;
 	drv->set_vdd_ret = 0;
+	drv->vdd_writes++;
 
 	if (drv->reg_cpu >= 0) {
 		int ret = smp_call_function_single(drv->reg_cpu,
@@ -427,6 +440,18 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 	 */
 	return drv->set_vdd_ret;
 }
+
+static int spm_stats_show(struct seq_file *s, void *data)
+{
+	struct spm_driver_data *drv = s->private;
+
+	seq_printf(s, "vdd_writes   %u\n", drv->vdd_writes);
+	seq_printf(s, "vdd_timeouts %u\n", drv->vdd_timeouts);
+	seq_printf(s, "volt_sel     %u (confirmed)\n", drv->volt_sel);
+	seq_printf(s, "volt_sel_req %u (last requested)\n", drv->volt_sel_req);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(spm_stats);
 
 static int spm_get_voltage_sel(struct regulator_dev *rdev)
 {
@@ -576,6 +601,7 @@ static void smp_set_vdd_v2_1_l2(void *data)
 		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
 				    pmic_sts & 0xff, vlevel);
 		drv->set_vdd_ret = -ETIMEDOUT;
+		drv->vdd_timeouts++;
 		return;
 	}
 
@@ -656,6 +682,12 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	} else {
 		drv->reg_cpu = -1;
 		dev_dbg(dev, "SAW2 L2 regulator (shared rail)\n");
+	}
+
+	if (IS_ENABLED(CONFIG_DEBUG_FS)) {
+		drv->debugfs = debugfs_create_dir(dev_name(dev), NULL);
+		debugfs_create_file("rail", 0444, drv->debugfs, drv,
+				    &spm_stats_fops);
 	}
 
 	ret = linear_range_get_selector_high(drv->reg_data->range,
