@@ -84,6 +84,8 @@ struct vadc_linear_graph {
  * enum vadc_scale_fn_type - Scaling function to convert ADC code to
  *				physical scaled units for the channel.
  * SCALE_DEFAULT: Default scaling to convert raw adc code to voltage (uV).
+ * SCALE_BATT_THERM: Returns temperature in millidegC using the battery
+ *			thermistor mapping (ratiometric).
  * SCALE_THERM_100K_PULLUP: Returns temperature in millidegC.
  *				 Uses a mapping table with 100K pullup.
  * SCALE_PMIC_THERM: Returns result in milli degree's Centigrade.
@@ -120,6 +122,7 @@ enum vadc_scale_fn_type {
 	SCALE_HW_CALIB_PMIC_THERM_PM7,
 	SCALE_HW_CALIB_PM5_CHG_TEMP,
 	SCALE_HW_CALIB_PM5_SMB_TEMP,
+	SCALE_BATT_THERM,
 	SCALE_HW_CALIB_INVALID,
 };
 

@@ -173,6 +173,14 @@
 
 			channel@30 {
 				reg = <VADC_LR_MUX1_BAT_THERM>;
+				/*
+				 * The battery thermistor is read against
+				 * VDD_VADC, as the vendor configuration does
+				 * (calibration-type "ratiometric"); the
+				 * mapping table is expressed in those terms.
+				 */
+				qcom,ratiometric;
+				qcom,hw-settle-time = <200>;
 			};
 		};
 
