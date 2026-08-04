@@ -97,12 +97,17 @@
  * (measured 2026-08-04: raw 10 and 37 at scale 0.001).  What does carry the
  * whole system is the USB input, so expose USBIN: it is the node that sags when
  * the port current-limits, and therefore the only honest early warning before
- * the PMIC latches UVLO.  1:4 pre-scaling is the divider in front of the ADC.
+ * the PMIC latches UVLO.
+ *
+ * 1:20 is the divider in front of this input.  Declaring 1:4 (the first guess)
+ * made the channel report 976576 uV at idle - exactly a fifth of the truth,
+ * which is how the ratio was identified: 0.9766 V x 5 = 4.88 V, a plausible
+ * VBUS for a host port with cable drop.
  */
 &pm8941_vadc {
 	channel@0 {
 		reg = <VADC_USBIN>;
-		qcom,pre-scaling = <1 4>;
+		qcom,pre-scaling = <1 20>;
 	};
 };
 
@@ -144,3 +149,33 @@
  * limit only ever needs to match the source on the USB connector, and that
  * source is a host port.
  */
+
+/*
+ * Input undervoltage floor, lowered from the phone's 4.45 V.  THIS is the fix
+ * for the load-onset resets, and it matters only because there is no cell.
+ *
+ * VPH is USBIN through the charge path here, so as soon as an onset droops the
+ * input toward this floor the buck folds back the board's only supply and VPH
+ * follows it through UVLO.  A phone never notices: its pack covers the deficit
+ * while the input is throttled.  The PMIC's own UVLO sits near 3.4 V, so 4.45 V
+ * was giving away about a volt of usable droop.
+ *
+ * Measured 2026-08-04 with an onset reproducer (schedutil, idle board, four awk
+ * workers launched in the same instant), counting deaths over attempts rather
+ * than trusting single draws:
+ *
+ *   4.45 V (phone value)   3 deaths in  4 attempts, every PON "UVLO"/"SMPL"
+ *   4.30 V (this value)    0 deaths in 17 attempts, a single boot throughout
+ *
+ * Under 4.30 V the input droops further (4.63 V vs 4.66 V) and simply carries
+ * on, which is the signature of not folding back.  4.30 V is also what six other
+ * mainline msm8974-class boards use (Sony rhine/amami/castor/sirius, Motorola
+ * falcon/peregrine); FP2's 4.45 V arrives from da281bf9345a with no stated
+ * rationale and matches the vendor's PMIC-wide default.
+ *
+ * Deliberately NOT changed for the phone: with a battery fitted the vendor value
+ * is the authority, and none of this has been validated on a device with a pack.
+ */
+&smbb {
+	qcom,minimum-input-voltage = <4300000>;
+};
