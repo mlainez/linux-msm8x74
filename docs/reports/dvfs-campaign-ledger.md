@@ -1666,3 +1666,46 @@ PLANNED (vendor-faithful, both properties exist downstream):
     spam, coherent power-supply reporting for the soak logger.
 Not implemented yet by Marc's instruction (a flash would abort the
 running suspect-pack survival test).
+
+## 2026-08-04 REFRAME (Marc): a KNOWN-GOOD BASELINE exists, so the load
+## death is a bisect over OUR deltas - not a thermal-tuning problem
+Marc's "days at 90 C, 960 MHz, 4-core BOINC" reference is **vanilla 6.12,
+no DVFS, none of this branch's modifications**, Ubuntu userspace, same
+silicon. Therefore heat alone is not fatal and the load death is caused by
+something WE added. Deltas vs that baseline, ranked:
+ 1. **XPU err-fatal armed** (our D0: qcom_scm xpu_err_fatal + DT). Vanilla
+    does NOT arm it. Arming converts any TrustZone XPU violation into an
+    instant, silent SoC reset with no console output - exactly our
+    signature - and we already PROVED this mechanism on this tree
+    (/dev/mem reads of protected regions reset the SoC identically, see
+    the devmem-xpu-hazard note). Prime suspect.
+ 2. CPU voltage scaling (SPM gang-rail regulator). Vanilla never moves the
+    Krait rail; we do, and temperature-dependent Vmin is not modelled.
+ 3. Frequencies above 960 MHz (vanilla is pinned at Marc's stable point).
+ 4. APC power-gate sequencer programmed by us (krait-apc); vanilla leaves
+    the head-switch hardware untouched.
+ 5. L2 static at 729.6 MHz while cores run 1200-1500 MHz (the vendor
+    scales L2 with the fastest online core; we never scale it).
+TODAY'S LOAD DEATH (R14, for the record): ~6 min of 4-core load, SoC 86 C,
+cores thermally capped 1036-1497 MHz, charger ENGAGED at 1.5 A,
+poff=0x0002 (PS_HOLD, kernel family - NOT the battery family), chg-gone
+never fired, battery 4.16 V, presence/temp traps 0/0, pwrirq 0. Note the
+family CHANGED vs this morning's identical-looking test, which died with
+poff=0x0000 (hard input collapse) while the charger was NOT engaged: so
+fixing engagement removed the input-starvation death and left this one.
+Temperature correlation across clean data points: 79 C survived 32 min
+(campaign, earlier), 83 C died (this morning), 86 C died (now).
+EXPERIMENT SEQUENCE (pre-registered):
+ EXP-A (running): our kernel, ALL policies pinned 960 MHz (no
+   transitions), 4-core load, 30 min - replicates Marc's baseline
+   operating point on our tree. Survival => the failure lives above
+   960 MHz (deltas 2/3/5). Death => frequency exonerated, cause is
+   structural (deltas 1/4), XPU err-fatal first.
+ EXP-B: disarm XPU err-fatal (DT/SCM), repeat the failing load test.
+ EXP-C: revert the APC power-gate programming, repeat.
+ EXP-D: reproduce the vanilla baseline on THIS DUT (Marc's reference was a
+   different unit/rootfs) so the control is ours, not borrowed.
+INSTRUMENTATION FIX: `S90soak-logger restart` used to write the
+clean-shutdown marker, which made this genuine silent reset look like an
+orderly reboot in the first read of the post-mortem. Restart no longer
+forges the marker.
