@@ -165,6 +165,13 @@ struct smbb_charger {
 
 	bool dc_disabled;
 	bool jeita_ext_temp;
+	/*
+	 * Set for boards that must never run a charge cycle - a carrier board
+	 * feeding the battery terminals from a bench supply, for instance.
+	 * The driver stays loaded for OTG and reporting, but the charge path
+	 * is actively turned off rather than left as the boot chain had it.
+	 */
+	bool charging_disabled;
 	unsigned long status;
 	struct mutex statlock;
 
@@ -598,6 +605,13 @@ static void smbb_engage_work(struct work_struct *work)
 
 	smbb_hw_state(chg, &input, &charging, &bat_ready, &done);
 
+	if (chg->charging_disabled) {
+		/* keep the path off; nothing here should ever enable it */
+		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				   CTRL_EN, 0);
+		return;
+	}
+
 	if (!input) {
 		/*
 		 * Cable gone: forget what was learned about this supply and
@@ -675,8 +689,20 @@ static void smbb_engage_work(struct work_struct *work)
 		 * the vendor does (it re-arms once at end of charge and then
 		 * waits on the comparator).
 		 */
-		if (charging || !bat_ready || done || smbb_battery_full(chg)) {
-			/* running, or the battery is in no state to charge */
+		if (!bat_ready) {
+			/*
+			 * No battery to charge: leave the path off entirely.
+			 * On a board whose battery terminals are fed from a
+			 * supply, enabling it would drive the charger against
+			 * that supply.  A battery appearing raises the
+			 * presence interrupt, which kicks us again.
+			 */
+			regmap_update_bits(chg->regmap,
+					   chg->addr + SMBB_CHG_CTRL,
+					   CTRL_EN, 0);
+			break;
+		}
+		if (charging || done || smbb_battery_full(chg)) {
 			regmap_update_bits(chg->regmap,
 					   chg->addr + SMBB_CHG_CTRL,
 					   CTRL_EN, CTRL_EN);
@@ -1206,6 +1232,8 @@ static int smbb_state_show(struct seq_file *s, void *data)
 	seq_printf(s, "  chg_trkl    %d\n", !!(status & STATUS_CHG_TRKL));
 	seq_printf(s, "  chg_done    %d\n", !!(status & STATUS_CHG_DONE));
 	seq_printf(s, "  chg_gone    %d\n", !!(status & STATUS_CHG_GONE));
+	if (chg->charging_disabled)
+		seq_puts(s, "charging      DISABLED by device tree\n");
 	seq_printf(s, "supervisor    rearms=%u gate_clears=%u stage=%u backoff=%ums\n",
 		   chg->rearm_count, chg->gate_clear_count, chg->rearm_stage,
 		   chg->rearm_delay_ms);
@@ -1472,6 +1500,12 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->jeita_ext_temp = of_property_read_bool(pdev->dev.of_node,
 			"qcom,jeita-extended-temp-range");
+
+	chg->charging_disabled = of_property_read_bool(pdev->dev.of_node,
+			"qcom,charging-disabled");
+	if (chg->charging_disabled)
+		dev_info(&pdev->dev,
+			 "charging disabled by device tree; keeping the charge path off\n");
 
 	/*
 	 * The BTC temperature-range select (and the comparator enable,
