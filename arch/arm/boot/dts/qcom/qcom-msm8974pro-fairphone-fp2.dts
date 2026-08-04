@@ -464,8 +464,6 @@
 	vmmc-supply = <&pm8941_l21>;
 	vqmmc-supply = <&pm8941_l13>;
 
-	cd-gpios = <&tlmm 62 GPIO_ACTIVE_LOW>;
-
 	pinctrl-names = "default", "sleep";
 	pinctrl-0 = <&sdc2_on>;
 	pinctrl-1 = <&sdc2_off>;
@@ -517,13 +515,6 @@
 			pins = "sdc2_cmd", "sdc2_data";
 			drive-strength = <6>;
 			bias-pull-up;
-		};
-
-		cd-pins {
-			pins = "gpio62";
-			function = "gpio";
-			drive-strength = <2>;
-			bias-disable;
 		};
 	};
 
