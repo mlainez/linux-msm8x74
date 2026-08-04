@@ -1771,3 +1771,67 @@ this run" has an answer that survives what a preempt-disabled printk does
 not. This replaces the SD canary the CD fix removes, and measures the
 quantity directly rather than by proxy.
 R15 = card detect; R16 = + rail counters.
+
+## 2026-08-04 late: EXP-D CONTROL finally running + strategy change (Marc)
+Marc's correction on method: "lower your bias towards moving forward, act
+like a researcher, not a code monkey". Accepted. Concrete failures today:
+7 images flashed (R11..R17), R16 carried a DT change never tested for one
+minute; the card-detect pin was taken from SONY device trees while the
+authoritative FP2 (oracle) sat connected to the same host - and the
+oracle's own data (gpio62 UNCLAIMED, no CD interrupt anywhere, gpio63 =
+CDC_RESET) was in the agent report I skimmed past. Two claims made and
+retracted in one afternoon (chronic tsens storm; latency mechanism for
+pwr_irq). Card-detect reverted in R17.
+CONTROL (EXP-D) at last, and it already existed on disk: 6.12/baseline =
+v6.12.100-41-g3574d3a3652a (stable 6.12.100 + 41 msm8974-mainline commits:
+rpmpd power domains, remoteproc single-PD, other boards' DTs). VERIFIED
+free of every campaign suspect - no cpu OPP table, no saw_l2_vreg, no
+xpu-err-fatal, no cpu_hot trips/cooling-maps, no APC programming, no rail
+counters (greps 0 in the built DTB and objects; the same greps hit in
+int/d3). Built via local.mk override (backup at local.mk.int-backup -
+RESTORE IT before building our tree again).
+Pre-registered predictions before flashing, so the result cannot be
+rationalised afterwards:
+ 1. no cpufreq/DVFS -> CONFIRMED (no cpufreq dir at all).
+ 2. control storms tsens too (same driver+zones, upstream bug) -> NOT YET
+    TESTABLE: control reads 0 IRQ/s at idle 54 C, but OUR tree also reads
+    0/s at idle 54 C; the bursts only appeared at 84-87 C. Requires the
+    same load/temperature. Load run started.
+ 3. control logs pwr_irq timeouts too -> same caveat, 0 so far at idle.
+LIMITATION FOUND: the pon-reason decoder is OUR commit, so the control
+prints no PON reason. The control can say WHETHER it resets, not WHY. If
+it resets, add only that read-only instrument for a second control run.
+TSENS ROOT CAUSE (vendor authority, register level): monitoring all 11
+sensors on one uplow line is LEGITIMATE (per-sensor threshold/status/clear
+registers; only the enable bit and GIC line are shared; the vendor does
+exactly this in production, and the "single register" restriction applies
+only to pre-v0.1 IP). The storm is mainline violating the vendor's
+ack/re-arm invariants on the v0_1 path: (a) the clear bit is dual purpose
+(write 1 = clear+mask, write 0 = re-arm) and mainline's helper writes
+`enable ? 0 : 1`, called only with enable=true, so 1 is NEVER written -
+the vendor's ack step does not exist upstream; (b) the only write is a
+conditional re-arm, and thermal_zone_set_trips() short-circuits when the
+window is unchanged, so with a LEVEL line + IRQF_ONESHOT the core unmasks
+on thread return and re-enters immediately = the 6157/s burst, thread
+bound, single CPU (matches every measurement); (c) a sensor reading
+outside the clamped -40..120 C window latches forever - RULED OUT here,
+all ten bound sensors read 53-54 C. Vendor also requests EDGE_RISING, not
+level. Fix set (not written, deliberately): clear+mask per violating
+sensor before thermal_zone_device_update; write 1-then-0 around threshold
+changes; never arm a bound already violated; optionally match the vendor's
+edge-triggered request.
+ANALYSIS: this defect is in the SHARED mainline driver with upstream
+thermal zones, so the vanilla control should storm identically - a defect
+present in both the surviving and dying configurations cannot be the
+reset differentiator. The control's load run tests exactly that.
+STRATEGY CHANGE (Marc): after this control, move to the CARRIER RIG and
+stabilise there rather than fighting battery packs. Rationale is sound -
+the rig removes the pack/bay contact variable entirely. What we now have
+that we lacked when the rig was declared unusable: PON reason decode
+(UVLO vs PS_HOLD vs battery family), rail-handshake counters, the
+recorder with charger/battery/tsens fields, and a charger driver that
+refuses to charge without a battery plus qcom,charging-disabled. On the
+rig the VADC VBAT channel becomes a SUPPLY MONITOR - a sagging 5 V feed
+becomes measurable at sample resolution instead of inferred. Note what
+CANNOT move to the rig: all charger tier-2/tier-3 validation needs a real
+battery, so that work stays on the phone.
