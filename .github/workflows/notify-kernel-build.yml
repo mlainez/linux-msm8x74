@@ -1,7 +1,14 @@
 name: notify-kernel-build
 
-# Every push to 6.18/rc (a promotion or an automated stable merge) tells
+# Every push to an rc branch (a promotion or an automated stable merge) tells
 # Citronics/citronics-kernel to build and release fresh deb packages.
+#
+# 6.12/rc is watched as well as 6.18/rc: 6.12 is the production series (its
+# display works, the vram carveout still exists there) and as of 2026-08-05 its
+# DVFS and thermal throttling are validated on hardware, so its debs need to
+# reach the APT repository like 6.18's do.  citronics-kernel decides what to
+# rebuild by comparing each entry's upstream commit against build-state.tsv, so
+# a dispatch for one series does not rebuild the other.
 # Requires the KERNEL_DISPATCH_TOKEN secret: a PAT with permission to send
 # repository_dispatch to Citronics/citronics-kernel. Without the secret this
 # job FAILS on purpose - see the guard below.
@@ -10,6 +17,7 @@ on:
   push:
     branches:
       - '6.18/rc'
+      - '6.12/rc'
   workflow_dispatch:
 
 permissions: {}
