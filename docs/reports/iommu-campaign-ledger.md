@@ -821,3 +821,84 @@ If it does not, the change did not take and the run is void.
 - **Q4** The timeout persists unchanged ⇒ the height is not the mechanism; the TE
   interrupt path (b) becomes the single variable for EXP-D7.3, and this change is
   reverted rather than left in.
+
+---
+
+## 2026-08-06 (night) — EXP-D7.2 COMPLETE: Q4, and TE is proven absent
+
+Image: kernel `49beef47e814` (= `32253dc052c3` + `SYNC_CONFIG_HEIGHT = 0xfff0`),
+DUT `e4f4c070`. Captures: `artifacts/fp2-dut/20260806-expd72/`.
+
+**Verification passed:** `pp0+0x08 = 0x0000fff0`, so the change took effect and the
+run is valid.
+
+**Verdict: Q4 — the height is not the mechanism.** But the result is far more
+useful than a null, because making the register vendor-identical made the failure
+*worse in a diagnostic direction*:
+
+| Run | `pp done time out` | pattern |
+|---|---|---|
+| D7.1, `2 * vtotal` (0x0f20) | **1** | once at 3.12 s, never again through 42 s |
+| D7.2, `0xfff0` (vendor) | **161** | 3.18 s → 93 s, every ~560 ms, indefinitely |
+
+With the tight fallback the internal counter fires and releases the wait; with the
+vendor's effectively-disabled counter every frame waits on TE and never completes.
+**So the internal fallback counter is the only thing completing frames on this
+board.**
+
+**TE is definitively absent, by three independent measurements:**
+
+1. Behaviour above: disable the fallback ⇒ nothing ever completes.
+2. `PP_INT_COUNT_VAL` = `{FRAME_COUNT[31:16], LINE_COUNT[15:0]}`. Oracle:
+   `0x073b0782` → 1851 frames counted, line 1922 (inside vtotal 1936, i.e. TE
+   resets it every frame). Our DUT, three samples a second apart: `0x0000e21d`,
+   `0x0000b605`, `0x00008cd2` → **FRAME_COUNT = 0 every time**, LINE_COUNT running
+   free to 57885/46597/36050, far past vtotal. Not one frame has ever been
+   synchronised, and the line counter is never reset.
+3. The block itself is alive and clocked — the counter advances — so this is not a
+   dead clock or an unpowered block.
+
+**What is therefore excluded as the cause** (each measured, not argued): the mixer
+(`LM0_OUT_SIZE` matches the oracle), SMP allocation (`0x000a0a0a`), the IOMMU (zero
+faults, oracle-identical CB state), the CTL category fallback (normal at v1.2), the
+PP configuration itself (`SYNC_CONFIG_VSYNC = 0x001800a5` with `vclks_line = 0xa5`,
+**identical** to the oracle, and the vendor computes the same
+`BIT(19)|BIT(20)|vclks_line` because the FP2 panel sets
+`qcom,mdss-dsi-te-using-te-pin`), the tear-check thresholds/start-pos/init-val
+(all identical), the vsync clock (mainline does `clk_set_rate` +
+`clk_prepare_enable`, lines 84-94), the DT pin muxing, **and** the runtime muxing:
+`/sys/kernel/debug/pinctrl/fd510000.pinctrl/pinmux-pins` shows
+`pin 12 (GPIO_12): device fd922800.dsi.0 function mdp_vsync group gpio12`.
+
+**Reverted** per Q4's pre-registration: `49beef47e814` is not kept. The tree
+returns to `2 * vtotal`, which at least limps.
+
+### PRE-REGISTERED: EXP-D7.3 — does the panel emit TE at all?
+
+Two candidates remain and they need different fixes, so they must not be tested
+together:
+
+- **(a)** the panel never emits TE (its `set_tear_on` is sent but ineffective, or
+  its init sequence does not complete);
+- **(b)** TE is emitted and electrically present, but the MDP does not latch it
+  (polarity, or a routing/select the vendor programs elsewhere).
+
+**Single variable: divert the TE line to a countable GPIO.** Re-mux `gpio12` from
+`mdp_vsync` to `gpio` and give it a consumer that counts edges (a `gpio-keys`
+entry, counted via `/proc/interrupts`). This is a **DT-only** change, so per the
+project's build-economy rule it is done by patching the DTB with `fdtput` and
+verifying by decompiled diff + md5 — no kernel rebuild.
+
+It necessarily breaks the display path (TE no longer reaches the MDP), which is
+acceptable: the display is already black, and this run is a diagnostic, not a fix.
+
+**Predictions:**
+
+- **R1** edges counted at ~60 Hz ⇒ the panel *is* emitting TE ⇒ candidate (b); the
+  next single variable is the MDP-side latch (polarity/select), and the vendor's
+  INTF/PP writes get read line by line for a register mainline omits.
+- **R2** no edges at all ⇒ candidate (a) ⇒ the panel is not emitting; the next
+  variable is the panel init/TE-command path, and the oracle's DSI register set
+  becomes the reference for what a TE-emitting panel looks like.
+- **R3** edges at a wrong rate (not ~60 Hz) ⇒ the panel emits something else; treat
+  as (b) but suspect the mode/timing rather than the latch.
