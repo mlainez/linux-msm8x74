@@ -5,6 +5,7 @@
  * Author: Rob Clark <robdclark@gmail.com>
  */
 
+#include <linux/debugfs.h>
 #include <linux/delay.h>
 #include <linux/interconnect.h>
 #include <linux/of_irq.h>
@@ -210,6 +211,101 @@ static void mdp5_kms_destroy(struct msm_kms *kms)
 	mdp5_destroy(mdp5_kms);
 }
 
+#ifdef CONFIG_DEBUG_FS
+/*
+ * Hardware register windows, offsets from the MDP5 base ("mdp_phys").
+ *
+ * Taken from the vendor device tree rather than guessed: msm8974-mdss.dtsi gives
+ * qcom,mdss-ctl-off, -pipe-{vig,rgb,dma}-off, -mixer-intf-off, -dspp-off and
+ * -intf-off. They are the same on every MDP5 v1.x, and the set below is chosen
+ * to answer one question: when a commit completes and the panel still shows
+ * black, did the pipe fetch anything (SMP_ALLOC in the top block) and did the
+ * mixer stage it (CTL_LAYER, LM blend/border)?
+ *
+ * The driver already prints its *intended* SMP allocation through
+ * mdp5_smp_dump() in the atomic state dump; this prints what the hardware
+ * actually holds, which is the part that decides whether a frame has content.
+ */
+struct mdp5_reg_window {
+	const char *name;
+	u32 off;
+	u32 len;
+};
+
+static const struct mdp5_reg_window mdp5_reg_windows[] = {
+	{ "mdp_top", 0x00000, 0x400 },	/* HW_VERSION, DISP_INTF_SEL, SMP_ALLOC_W/R */
+	{ "ctl0",    0x00600, 0x100 },	/* CTL_LAYER staging + CTL_FLUSH */
+	{ "ctl1",    0x00700, 0x100 },
+	{ "vig0",    0x01200, 0x200 },	/* SSPP: src addr/stride/format/size */
+	{ "rgb0",    0x01e00, 0x200 },
+	{ "dma0",    0x02a00, 0x200 },
+	{ "lm0",     0x03200, 0x200 },	/* LM_OUT_SIZE, blend, border colour */
+	{ "dspp0",   0x04600, 0x200 },
+	{ "intf1",   0x21300, 0x200 },	/* INTF1 = DSI0: timing + engine enable */
+};
+
+static int mdp5_regs_show(struct seq_file *s, void *unused)
+{
+	struct mdp5_kms *mdp5_kms = s->private;
+	struct device *dev = &mdp5_kms->pdev->dev;
+	int i, j, ret;
+
+	/*
+	 * mdp5_read() warns if the block is not enabled, and reading an
+	 * unclocked MDP returns zeroes at best. Resume through runtime PM, which
+	 * calls mdp5_enable() for us, and say so if that fails rather than
+	 * printing a window of zeroes that would be mistaken for hardware state.
+	 */
+	ret = pm_runtime_resume_and_get(dev);
+	if (ret) {
+		seq_printf(s, "# MDP not resumable (%d): no register state\n", ret);
+		return 0;
+	}
+
+	for (i = 0; i < ARRAY_SIZE(mdp5_reg_windows); i++) {
+		const struct mdp5_reg_window *w = &mdp5_reg_windows[i];
+
+		seq_printf(s, "# window=%s offset=0x%05x len=0x%x\n",
+			   w->name, w->off, w->len);
+
+		for (j = 0; j < w->len; j += 16)
+			seq_printf(s, "0x%08x: %08x %08x %08x %08x\n",
+				   w->off + j,
+				   mdp5_read(mdp5_kms, w->off + j),
+				   mdp5_read(mdp5_kms, w->off + j + 4),
+				   mdp5_read(mdp5_kms, w->off + j + 8),
+				   mdp5_read(mdp5_kms, w->off + j + 12));
+	}
+
+	pm_runtime_put_sync(dev);
+
+	return 0;
+}
+
+static int mdp5_regs_open(struct inode *inode, struct file *file)
+{
+	return single_open(file, mdp5_regs_show, inode->i_private);
+}
+
+static const struct file_operations mdp5_regs_fops = {
+	.owner   = THIS_MODULE,
+	.open    = mdp5_regs_open,
+	.read    = seq_read,
+	.llseek  = seq_lseek,
+	.release = single_release,
+};
+
+static int mdp5_kms_debugfs_init(struct msm_kms *kms, struct drm_minor *minor)
+{
+	struct mdp5_kms *mdp5_kms = to_mdp5_kms(to_mdp_kms(kms));
+
+	debugfs_create_file("mdp5_regs", 0400, minor->debugfs_root,
+			    mdp5_kms, &mdp5_regs_fops);
+
+	return 0;
+}
+#endif /* CONFIG_DEBUG_FS */
+
 static const struct mdp_kms_funcs kms_funcs = {
 	.base = {
 		.hw_init         = mdp5_hw_init,
@@ -226,6 +322,9 @@ static const struct mdp_kms_funcs kms_funcs = {
 		.wait_flush      = mdp5_wait_flush,
 		.complete_commit = mdp5_complete_commit,
 		.destroy         = mdp5_kms_destroy,
+#ifdef CONFIG_DEBUG_FS
+		.debugfs_init    = mdp5_kms_debugfs_init,
+#endif
 	},
 	.set_irqmask         = mdp5_set_irqmask,
 };
