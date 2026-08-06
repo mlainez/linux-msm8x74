@@ -338,6 +338,37 @@ Oracle numbers to capture (authority 2, CP0):
 - **I3** BFB block (done).
 - **I4** `MICRO_MMU_CTRL` vs `INTR_SEL_NS` keying (done).
 - **I5** SID/SMR audit for MDP against the oracle (open).
+- **I8 V7S vs LPAE — re-test the format decision** (added 2026-08-06). Our port
+  forces `ARM_V7S` on the msm8974 secure instance on vendor authority, and on one
+  on-device observation ("with LPAE the bank translates garbage: no fault, black
+  scanout"). **That observation is confounded:** it predates the fix for the
+  `restore_sec_cfg` gating bug, and an uninstalled stream mapping produces exactly
+  the same symptom (traffic bypasses translation) whatever the page-table format
+  is. Meanwhile **mainline msm8916 runs its MDP through this same driver with the
+  default `ARM_32_LPAE_S1`** and is validated in the field. So: with the gating fix
+  in place, try LPAE. Cheap (one allocator argument), decisive, and it decides how
+  much hand-rolled divergence from upstream the port has to carry.
+  - LPAE works ⇒ drop the V7S path; the port becomes far more upstreamable.
+  - LPAE still black ⇒ V7S is validated on evidence rather than authority alone,
+    and reference B below shows the upstream-shaped way to carry it.
+- **I9 mine the two working references** (added 2026-08-06):
+  - **A — msm8916 `apps_iommu` (arm64 `msm8916.dtsi`, mainline).** `iommus =
+    <&apps_iommu 4>` on `mdss_mdp`, instance `compatible = "qcom,msm8916-iommu",
+    "qcom,msm-iommu-v1"` with **`qcom,iommu-secure-id = <17>`** and *mixed*
+    contexts: `iommu-ctx@3000` VFE `-sec`, `iommu-ctx@4000` MDP_0 **`-ns`**. That is
+    our exact shape (secure-id instance, non-secure MDP bank), it uses
+    `asid == SID == CB index`, and it works. **This is the sibling reference D8
+    said did not exist** — it does, for the driver, just not for this SoC.
+  - **B — apq8064 `mdp_port0`/`mdp_port1` + `drivers/iommu/msm_iommu.c`
+    (mainline).** `iommus = <&mdp_port0 0 …>` on the display node, driven by the
+    only mainline IOMMU driver that programs **`ARM_V7S`**
+    (`alloc_io_pgtable_ops(ARM_V7S, …)`). Krait-era hardware, one SoC generation
+    before ours. Reference for the V7S configuration if I8 keeps it.
+  - **C — `backup-iommu-msm8974` (LOCAL ONLY, not on origin).** The 6.15-era
+    ancestor of this work: MDP/GPU/Venus IOMMU nodes, the wirings, defconfig, the
+    `pm_runtime_resume_and_get` conversion and the non-secure SCM/`INTR_SEL_NS`
+    skip. **Do not delete it** — it is the one branch here that a `git fetch`
+    cannot restore.
 - **I6** secure vs non-secure CB assignment: which CB may Linux own on a
   TZ-managed instance, and what TZ expects to keep (open).
 - **I7** GPU instance interaction: both instances live at once (open).

@@ -386,3 +386,79 @@ bus-clock part only; do not delete the topic wholesale.
   in the whole range). Third confirmation; that fix is ours.
 - **Rebase hazard:** `2026159372bb` (`iommu/qcom`: scoped OF child loop) touches
   the child-loop region our port modifies.
+
+---
+
+## 2026-08-06 (reuse hunt) — D8 CORRECTED: a working sibling reference exists, and it confounds the V7S decision
+
+**Correction to this morning's D8 entry.** It concluded "there is no working
+reference for MDP-through-SMMU on msm8974 … authority 3 is empty for this work".
+The literal claim (no *msm8974* board wires `iommus = <&mdp_iommu …>` anywhere)
+still holds, but the conclusion drawn from it was wrong and it shaped the plan:
+**mainline runs an MDP through this very driver on a sibling SoC.** I concluded
+"no reference" from a query scoped to msm8974 instead of to the driver. That is
+the mistake the wall protocol exists to prevent, made while writing the wall
+protocol into a plan.
+
+### Reference A — msm8916 `apps_iommu` (mainline, arm64 `msm8916.dtsi`)
+
+```
+mdss_mdp: display-controller@1a01000 { iommus = <&apps_iommu 4>; }
+apps_iommu: iommu@1ef0000 {
+	compatible = "qcom,msm8916-iommu", "qcom,msm-iommu-v1";
+	ranges = <0 0x01e20000 0x20000>;   reg = <0x01ef0000 0x3000>;
+	qcom,iommu-secure-id = <17>;
+	iommu-ctx@3000 { compatible = "qcom,msm-iommu-v1-sec"; };   /* VFE  */
+	iommu-ctx@4000 { compatible = "qcom,msm-iommu-v1-ns";  };   /* MDP_0 */
+};
+```
+
+This is **our exact shape** — a `secure-id` instance whose MDP context bank is
+**non-secure**, which is what the findings report called "exactly the MDP shape"
+and what our bug #8 fix (`restore_sec_cfg` must not be gated on a `-sec` child
+existing) makes msm8974 behave like. It also confirms the convention our port
+relies on: `asid == SID == CB index` (SID 4 ↔ CB at +0x4000). And msm8916 display
+is validated in the field by every pmOS msm8916 device.
+
+Reusable: the DT shape and conventions, and the fact that the driver's secure-id +
+`-ns`-bank path is a *working* path rather than an untrodden one.
+
+### Reference B — apq8064 `mdp_port0/1` + `drivers/iommu/msm_iommu.c` (mainline)
+
+`iommus = <&mdp_port0 0 …>` on the display node, four instances
+(`mdp_port0`, `mdp_port1`, `gfx3d`, `gfx3d1`, `compatible = "qcom,apq8064-iommu"`),
+driven by the only mainline IOMMU driver that programs **`ARM_V7S`**
+(`msm_iommu.c:351 alloc_io_pgtable_ops(ARM_V7S, …)`). Krait-era hardware, one SoC
+generation before ours.
+
+Reusable: an upstream-shaped V7S configuration, if we keep V7S.
+
+### The decision this changes — new ACU I8 (V7S vs LPAE)
+
+**msm8916's MDP works with `ARM_32_LPAE_S1`** — the only format mainline
+`qcom_iommu.c` allocates. Our port forces V7S for the msm8974 secure instance on
+vendor authority *plus* one on-device observation: "with LPAE the bank translates
+garbage: no fault, black scanout".
+
+**That observation is confounded.** It was made before the `restore_sec_cfg`
+gating bug was found, and an uninstalled stream mapping makes traffic bypass
+translation entirely — producing no fault and a black screen **whatever the
+page-table format is**. So V7S may be carrying credit that belongs to bug #8.
+
+Pre-registered, before any device runs it: with the gating fix in place, allocate
+LPAE instead of V7S and change nothing else.
+
+- **LPAE works** ⇒ delete the V7S path. That removes the largest hand-rolled
+  divergence in the port and makes it plausibly upstreamable.
+- **LPAE still black** ⇒ V7S stands on evidence instead of authority alone, and
+  reference B shows how to carry it in an upstream shape.
+
+Either outcome is worth more than the current state, where the two changes are
+credited jointly and neither is isolated.
+
+### Reference C — `backup-iommu-msm8974`, and a warning
+
+The 6.15-era ancestor of this work (April 2026, 8 commits: MDP/GPU/Venus IOMMU
+nodes, the wirings, defconfig, `pm_runtime_resume_and_get`, and the non-secure
+SCM/`INTR_SEL_NS` skip). It is **local-only — not on origin** — so unlike the nine
+branches retired today, a `git fetch` cannot bring it back. **Do not delete.**
