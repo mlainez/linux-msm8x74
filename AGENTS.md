@@ -1,10 +1,11 @@
 # Contributing to this msm8974 kernel fork (humans and AI agents)
 
 This is a downstream Linux kernel fork for **Qualcomm MSM8974** devices
-(Fairphone 2 and friends). From the 6.18 series onwards it tracks the
-**mainline LTS stable branch (`linux-6.18.y`) directly** — the historical
-`msm8974-mainline` upstream is end-of-life, and this fork owns its patches
-now (planned horizon: at least two years on 6.18). It feeds two consumers:
+(Fairphone 2 and friends). It tracks mainline LTS stable branches directly and
+owns its patches. Two series run in parallel (see §1): **6.12 is the production
+baseline** (its display works — drm/msm still has the vram carveout there) and
+**6.18 is LTS-tracking/research** (its display is unsolved upstream-wide). Both
+are LTS with the same projected EOL, Dec 2028. It feeds two consumers:
 
 - **citronics-kernel** → Debian/Ubuntu kernels for users to try
   (`debos-citronics`, `deb-packages`).
@@ -24,6 +25,20 @@ axis** because several are maintained in parallel (`6.15`, `6.18`, …).
 <kver>/topic/<feature>   →   <kver>/staging   →   <kver>/rc   →   <kver>/release
         (one feature)          (integrate all)      (candidate)      (blessed)
 ```
+
+### Which series is which (2026-07 onwards)
+
+Two series are maintained in parallel, both LTS with the same projected EOL
+(**Dec 2028**), so tracking security fixes costs nothing either way:
+
+| Series | Role | Display |
+|---|---|---|
+| **6.12** | **production baseline** — `6.12/baseline` = stable `linux-6.12.y` + msm8974-mainline's 6.12 work; features are added on top (sensors, then DVFS) | **works**: drm/msm still has the vram carveout (`msm.vram=192m`) |
+| **6.18** | LTS-tracking / research | **broken and unsolved**: 6.18 removed the carveout (msm8974 was its only user) and no working MDP-IOMMU display exists for this family. Findings and resume points: `docs/reports/6.18-display-findings.md` |
+
+Consequence for planning: **feature work that must ship goes on 6.12**; 6.18
+work continues only to solve display (or to prepare for the day it is solved).
+`6.12/baseline` and `6.18/baseline` both receive automated stable merges (§5).
 
 | Tier | Example | Purpose | Lifecycle |
 |------|---------|---------|-----------|
@@ -188,6 +203,30 @@ when work from this fork is submitted **upstream**:
 
 ---
 
+## 3.1 Debugging walls: the authority order (hard rule)
+
+When a hardware-facing symptom survives **two fix attempts** (or an hour
+without a mechanism), stop reading the tree you are porting *to* — it is the
+one source known not to contain the answer — and walk the authority order in
+`docs/porting/BLUEPRINT-kernel-feature-bringup.md` §6.1:
+
+1. **vendor/downstream source** (register-level truth: how does the working
+   driver program this exact block?);
+2. **live oracle over adb** (the working stack's runtime state — keep the
+   Android phone connected for the whole campaign);
+3. **sibling ports** (msm8974-mainline, pmaports devices);
+4. **this fork's own history** (branches, reverts, abandoned attempts);
+5. **upstream history** between the last-working and current base.
+
+Parallelize the reading (one subagent per authority) rather than serially
+poking the device. Device experiments decide between authority-produced
+hypotheses; they do not replace the reading. Paid-for examples: the panel TE
+command injected by the downstream *framework* (in no command blob), and the
+V7S-vs-LPAE SMMU page-table format — both answered in minutes by authority 1
+after hours of mainline-side theorizing.
+
+---
+
 ## 4. Build & test (quick reference)
 
 - Topics/integration are built and flashed via the buildroot at
@@ -203,10 +242,11 @@ when work from this fork is submitted **upstream**:
 
 ## 5. Staying current with LTS security patches
 
-`6.18/staging` and `6.18/rc` are kept up to date with mainline
-`linux-6.18.y` automatically by `.github/workflows/stable-sync.yml`
-(scheduled): it fetches the stable branch and merges it into both branches,
-pushing on a clean merge and opening an issue on conflict. Rationale:
+Every maintained integration branch is kept up to date with its own mainline
+LTS branch automatically by `.github/workflows/stable-sync.yml` (scheduled):
+`6.12/{baseline,staging,rc}` from `linux-6.12.y` and
+`6.18/{baseline,staging,rc}` from `linux-6.18.y`. It fetches the stable branch
+and merges it, pushing on a clean merge and opening an issue on conflict. Rationale:
 security fixes must not wait for the next manual integration round; a stable
 merge is the one case where `rc` moves without a full §1.1 revalidation —
 follow up with an on-device check when convenient.
