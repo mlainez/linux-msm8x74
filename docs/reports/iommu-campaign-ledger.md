@@ -137,3 +137,86 @@ D6 (§2.8 of the plan) is not a matter of writing eight values: **the VBIF windo
 is not even mapped on this path**, and the port has to add the register range to
 the DT and the driver first. Recorded before writing any code, because it changes
 D6 from "program a table" to "add a register window, then program a table".
+
+---
+
+## 2026-08-06 (later) — D9 closed as a parity fix, M2 done, H2 corrected downward
+
+Still no device. Three results, one of which corrects this morning's entry.
+
+### D9 — vendor-parity gap found and closed (authority 1)
+
+**Finding.** The downstream driver halts the MMU before programming a context
+bank and does **not** care whether the instance is TrustZone-managed. In
+`msm_iommu-v1.c` `__attach_iommu()` (~line 745) the secure sequence is
+`msm_iommu_sec_program_iommu()` → `program_iommu_bfb_settings()` →
+`iommu_halt()` → `__program_context(..., is_secure, ...)`; only the
+*detach*-time halt is gated on `!is_secure` (~line 826). `iommu_halt()` itself
+is gated on `halt_enabled`, i.e. the DT property **`qcom,iommu-enable-halt`**,
+which `msm8974-v2-iommu.dtsi` sets on **both** MMSS instances — the MDP one
+included.
+
+Our port halted only when `qcom_iommu->nonsecure`, so the MDP instance
+(`secure-id 1`, single `-ns` bank) had its TTBR0/TCR/MAIR/SCTLR written with the
+MMU still running.
+
+**Fixed** on `6.18/topic/mdp-iommu`: `3e22a6c9cecd` (driver, reads the vendor's
+own property rather than deriving the behaviour from the security model, and
+follows the vendor's log-and-continue timeout semantics so a busy SMMU degrades
+to the old behaviour instead of failing the attach and taking the display down)
+and `7346f70c0dd8` (DT opt-in). Also releases the halt on every error exit — a
+failure after the non-secure halt previously returned with `HALT_REQ` latched,
+leaving the SMMU halted for good. **Compile-tested only** (ARM,
+`qcom_defconfig` + `CONFIG_QCOM_IOMMU=y`; FP2 DTB builds and carries the
+property). No device access.
+
+**Deliberately not claimed as the black-screen cause.** The MDP context-bank
+state was already verified on-device against the oracle
+(`SCTLR=000010eb TCR=0 FSR=0`), which is evidence *against* corrupted CB
+programming. This is a correctness/parity fix that removes a variable; D6 and D7
+remain the leading display hypotheses.
+
+**Also verified while there (no change needed):** the DT already gives the MDP
+SMMU `power-domains = <&mmcc MDSS_GDSC>` plus `MDSS_AHB`/`MDSS_AXI` clocks, so
+the "register write lost to a gated GDSC" version of D9 does not apply.
+
+### D6 — bigger than it looked (authority 5, static)
+
+6.18's drm/msm has **no VBIF support for MDP5 at all**: `vbif` appears only in
+the `dpu1` catalogs, and `mdp5_kms.c` maps a single window (`msm_ioremap(pdev,
+"mdp_phys")`), while the vendor's MDSS node declares
+`reg-names = "mdp_phys", "vbif_phys"`. So porting the vendor's eight
+`qcom,vbif-settings` values requires **adding the register range to the DT and
+mapping it in the driver first**. Recorded before writing code, because it turns
+D6 from "program a table" into a two-part change.
+
+### M2 — done: `docs/analysis/MEMORY-MAP-AUDIT-msm8974pro.md`
+
+**Correction to this morning's seed entry:** it used the **base** MSM8974
+numbers. The FP2 is a Pro, and `msm8974pro.dtsi:1758` overrides the hole to
+`<0x05a00000 0x7800000>` (not `<0x05d00000 0x07d00000>`), with
+`msm8974pro-ion.dtsi` putting the OTHER PIL heap at `0x05a00000 + 0x2100000`
+and a MODEM heap at `0x08000000 + 0x5000000`. The H2 window is therefore
+**`0x05a00000..0x08000000` (38.6 MB)**, three megabytes lower than recorded.
+
+Everything else in the map reconciles: `0x08000000..0x0d200000` matches
+(`mpss` + `mba`), `0x0fa00000..0x0ff00000` matches exactly (smem/tz/rfsa/rmtfs),
+and mainline reserves *more* than the vendor at `0x0d200000..0x0fa00000`, which
+is harmless. One further vendor-only reservation exists — `mdss_fb0`'s 30 MB
+framebuffer at `0x03200000..0x05000000` — but it is not an XPU hazard (see
+below); it matters only to the simpledrm control, whose lk2nd framebuffer lives
+in that low region.
+
+**H2 corrected downward.** The seed justified it with "PIL carveouts are
+XPU-locked by TZ at authenticate-and-reset". The audit shows the vendor's reason
+for withholding that window is that **HLOS itself allocates there** (an ION
+CARVEOUT heap handed to PIL) — and mainline loads no firmware from it, using the
+`0x08000000+` regions we do reserve. So whether any XPU lock covers
+`0x05a00000..0x08000000` on *our* boots depends on what SBL/TZ/lk2nd locked
+before Linux started, which only O1 can report.
+
+**Consequence, recorded before CP2 runs:** O1 comes first. A reservation that
+merely moves an allocation pattern would "fix" the symptom without proving the
+mechanism — the definition of a lucky shot. H2's test stays cheap and stays on
+the list; it is no longer the leading hypothesis on the strength of this audit
+alone.
