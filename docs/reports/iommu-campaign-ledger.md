@@ -274,3 +274,39 @@ itself is gone there (`eab7766c79fd`), and restoring it is the fight the finding
 report already rejected (conflicts in every touched file after the VM_BIND
 rework). MDP-through-SMMU remains the only 6.18 path, and it is the one the
 campaign is built around.
+
+---
+
+## 2026-08-06 (end of session) — authority 5 swept to the upstream horizon (v6.19.14)
+
+`stable/linux-6.19.y` fetched (it was absent from this clone); v6.19.14
+(2026-04-22) is the newest stable branch kernel.org carries, so the sweep now
+reaches the upstream horizon. Full result:
+`docs/analysis/UPSTREAM-SWEEP-msm8974.md`.
+
+**For this campaign, three conclusions:**
+
+1. **D8 holds at 6.19.** No msm8974 SMMU support and **no MDP5 VBIF/QoS support**
+   exists at any upstream version. MDP-through-SMMU on this SoC is still a first,
+   and D6 is still ours to write.
+2. **One base-move hazard recorded:** `fd714986e4e4` (iommu core: pass the old
+   domain to `attach_dev` callbacks) changes the signature our
+   `qcom_iommu_attach_dev` implements. Harmless while 6.18 is the base; it is work
+   the day we move.
+3. **One upstream fix deliberately not adopted:** `6a3908ce56e6` (device leak in
+   `qcom_iommu_of_xlate()` — our base releases the reference only on error paths,
+   so one refcount leaks per attached master). It only prevents driver unbind,
+   which we never do, and it is precisely what stable 6.18.y backports.
+   Cherry-picking it ourselves would collide with the automated stable merge on an
+   integration branch. **Watch, don't pick.**
+
+**Corroboration worth recording:** upstream 6.19 fixed the msm8974 ADSP to take
+the CX power domain (`a1f2c2d55a81` + binding `3d447dcdae53`) — the same change,
+for the same reason, that our `adsp-sensors` work already carries on **both**
+series. Our fix predates theirs and matches it. When a base move brings that
+commit in, our local edit to the resource table becomes redundant and should be
+dropped rather than merged around.
+
+**And a reference for D5:** `84df51667a19` adds `simple-framebuffer` to a mainline
+msm8226 board **in the board DT**, which is worth comparing against our
+lk2nd-injected `/chosen/framebuffer` when the simpledrm glitches are picked up.
