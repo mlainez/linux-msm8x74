@@ -220,3 +220,57 @@ merely moves an allocation pattern would "fix" the symptom without proving the
 mechanism — the definition of a lucky shot. H2's test stays cheap and stays on
 the list; it is no longer the leading hypothesis on the strength of this audit
 alone.
+
+---
+
+## 2026-08-06 (later still) — D8: there is no working reference for MDP-through-SMMU on msm8974
+
+Authority 3 (sibling ports) and authority 5 (upstream) are **empty** for this
+work, which the plan assumed they were not.
+
+**Measured, static:**
+
+| Tree | `iommu@` nodes in `qcom-msm8974.dtsi` |
+|---|---|
+| mainline v6.12 | **0** |
+| mainline v6.16 | **0** |
+| mainline v6.18 | **0** |
+| pmaports fork `v6.16.12-msm8974` | **0** (and `mdp_iommu` appears nowhere) |
+| our `6.12/rc` | 0 (consistent — 6.12 uses the vram carveout) |
+| our `6.18/staging` | **3**: `mdp_iommu@fd928000`, `gpu_iommu@fdb10000`, `venus_iommu@fdc84000` |
+
+So the entire msm8974 SMMU device-tree description is **fork-original**, derived
+from authority 1, and **nobody upstream or in the sibling fork has ever run the
+MDP through its SMMU on this SoC**. No board anywhere wires
+`iommus = <&mdp_iommu ...>`.
+
+**What the sibling fork did instead**, on its 6.16 base: `ebe7a4353e07 Revert
+"drm/msm: Limit command submission when no IOMMU"` — i.e. it keeps the
+carveout/no-IOMMU path alive rather than translating the MDP. That is the same
+strategy 6.12 ships here.
+
+**Consequences, recorded so CP6 is planned with its real risk:**
+
+1. **CP6 is a first, not a port.** Comparisons can only come from authority 1
+   (vendor register sequences) and authority 2 (the oracle's live MDP/SMMU
+   register dumps). When something disagrees, there is no third tree to arbitrate
+   — which raises the value of the oracle captures in plan §5 from "useful" to
+   "the only referee".
+2. **It explains the shape of the failure.** "Attached, zero faults, black" with
+   no reference implementation is what a first port looks like when one
+   implementation-defined block is still missing — the same signature the BFB
+   block and the V7S format each produced before they were found. D6
+   (`vbif`/`mdp-settings`, and now known to need a register window added) is the
+   next such block in that series.
+3. **Base choice, stated once and not re-litigated:** 6.16 still has the vram
+   carveout *and* the sibling fork's revert, so a working *drm/msm* display on
+   6.16 is a known-cheap path, while on 6.18 it requires this first-ever port.
+   The operator has chosen 6.18; this entry only records that the cost
+   difference is now measured rather than assumed, so the choice can be revisited
+   on evidence rather than on mood.
+
+**Not a dead end:** the fork's revert is irrelevant *on 6.18* — the carveout code
+itself is gone there (`eab7766c79fd`), and restoring it is the fight the findings
+report already rejected (conflicts in every touched file after the VM_BIND
+rework). MDP-through-SMMU remains the only 6.18 path, and it is the one the
+campaign is built around.
