@@ -534,3 +534,129 @@ wrong, which is consistent with zero faults and with oracle-matching CB state.
    it is a driver fix, not an IOMMU one.
 4. Only then D6 (VBIF/QoS) and I8 (V7S vs LPAE), which remain queued and are
    unaffected by this.
+
+---
+
+## 2026-08-06 (evening, on-device) — CP0 partially passed, three retractions, and the Track B referee obtained
+
+**Images under test.** DUT (real FP2, panel + battery, serial `e4f4c070`):
+`output-618obs/images/sdcard.img`, kernel `6.18.41` = `6.18/topic/mdp5-regdump`
+(`1f63fb3fb262` = `6.18/baseline` + the `mdp5_regs` instrument), display DTB,
+DVFS gated off, WCNSS firmware removed, USB net 10.0.43.1. Oracle (Android 10,
+serial `81314fe6`), rooted, display forced awake.
+
+### Methodology failure to record first
+
+**I flashed an instrument that had never been calibrated**, then drew four
+conclusions from it. Blueprint P1 exists to stop exactly this: an instrument is
+not evidence until it has shown a known-true reading. The `mdpdump.sh` self-checks
+I wrote that morning (offset appears in output, window not all-zero, no duplicate
+windows) catch a *broken* dump but cannot catch a **systematically mis-addressed**
+one, which is what happened. Cost: three wrong claims, corrected below, and one
+wasted flash cycle.
+
+### RETRACTED (all four from the same root cause)
+
+The `mdp5_regs` window list was copied from the vendor DT (`msm8974-mdss.dtsi`),
+whose offsets are **MDSS-base-relative**, while `mdp5_kms->mmio` maps
+**mdp_phys = MDSS + 0x100**. Every window therefore read one block high.
+
+| Claim made | Status |
+|---|---|
+| "`LM0_OUT_SIZE` = 0" | **retracted** — never read; it is at LM0+0x4, below the window |
+| "`intf1` all zero ⇒ DSI timing engine off" | **retracted** — that window was not the INTF block |
+| "`rgb0`/`dma0` entirely zero ⇒ no pipe has a source" | **retracted** — SSPP source registers are the first 0x40 bytes, skipped |
+| "the kernel's `lm.base = 0x3100` is wrong by 0x100" | **retracted** — see the translation rule below; the kernel is right |
+
+### SETTLED, and now trustworthy
+
+1. **Offset translation rule (measured, not inferred):**
+   `vendor_debugfs_offset = kernel_mmio_offset + 0x100`. Established by finding
+   the version word `10020001 00000100` at oracle vendor `0x100` and at DUT
+   kernel `0x0`. The version register is **mirrored** at MDSS+0 and MDP+0, which
+   is what made a naive "HW_VERSION at 0x0 on both" check ambiguous — that
+   ambiguity is what produced the fourth retraction above.
+2. **The kernel's msm8x74 register map is correct.** Translating the oracle's live
+   registers by −0x100 puts them exactly on this driver's documented bases: mixer
+   with `OUT_SIZE = 0x07800438` (1920×1080) at kernel `0x3100` = `lm.base[0]`;
+   pipes at kernel `0x1d00`/`0x2100`/`0x2500` = `pipe_rgb.base[]` and
+   `0x2900`/`0x2d00` = `pipe_dma.base[]`.
+3. **Track B referee obtained (plan §5.1, the capture that never existed).** On the
+   working Android stack the TZ diag interrupt table names XPU interrupts
+   explicitly — `0xe3` and `0xe4`, both `Description: SPI XPU` — with
+   **`int_count = 0` on all four CPUs**, and `tzdbg/reset` reporting
+   `Reset Type 0x0, counter 0x0` for every CPU. The only non-zero counters are
+   `SPI LPA` (CPU0=1) and `SPI WDo` (CPU0=1, CPU2=2, CPU3=1). Android arms
+   err-fatal unconditionally and has logged **no XPU violation**, so a non-zero
+   count under our kernel convicts our own bug rather than normal SoC behaviour.
+   Artifacts: `artifacts/fairphone2/oracle/20260806-tzdbg-mdp/tz-*.txt`.
+4. **Oracle captures are only valid with the display forced on.** The first MDP
+   capture of the evening was taken after Android's screen timeout: MDSS had
+   power-collapsed and the mixer/pipe registers read as residue (identical static
+   patterns repeating every 0x400). Re-captured with `svc power stayon true` and
+   the display state **bracketed before and after** the dump; `ctl0` went 1→3 and
+   `mdp_top` 10→20 non-zero words between the two. Any future oracle register
+   capture must carry that bracket or be discarded.
+5. **Eliminations that survive** (independent of the addressing error):
+   - SMP **is** allocated: `SMP_ALLOC_W/R = 0x000a0a0a` (base-relative, unaffected)
+     ⇒ **D7 hypothesis 1 (SMP starvation) is dead.**
+   - Writes reach the hardware: painting `/dev/fb0` changed LM blend words and
+     populated DSPP ⇒ not a power-collapse / lost-write mechanism, and the D9
+     halt work is not implicated in the black screen.
+   - `fall back to the other CTL category for INTF 1!` is **normal on this SoC**:
+     CTL booking only exists where single-flush is supported, which is hw rev
+     v3.0+, and this is MDP5 **v1.2**. (7.x upstream deleted single-flush.)
+   - Panel TE is correct: both FP2 panel drivers call
+     `mipi_dsi_dcs_set_tear_on_multi(…VBLANK)`.
+   - The TE pin is correct: `panel_te_pin` muxes `gpio12` to `function =
+     "mdp_vsync"`, matching the vendor's `qcom,platform-te-gpio = <&msmgpio 12 0>`.
+6. **The failure, restated with only what is proven.** DRM software state is fully
+   active (`crtc-0 enable=1 active=1`, mode 1080x1920@60, `cmd_mode=1`,
+   `hwmixer=LM0`, `ctl=0`, connector `DSI-1` connected, `/dev/fb0` present, plane-0
+   full-screen), the MDP SMMU is attached with vendor-identical CB state
+   (`SCTLR=000010eb TCR=0 FSR=0`) and zero faults, and the **first frame never
+   completes**: `pp done time out, lm=0` at t=3.1 s. What the hardware actually
+   holds is **not yet known**, because the only dump taken of it was
+   mis-addressed.
+
+### Instrument fixed (CP0 re-work)
+
+`32253dc052c3` on `6.18/topic/mdp5-regdump`: windows are now derived from
+`mdp5_cfg_get_hw_config()` — the same source the driver programs from, so the dump
+cannot disagree with what the hardware was told — and the **ping-pong block** is
+included, which the first version omitted and which is what actually drives a
+command-mode panel. Compile-tested; **not yet calibrated**.
+
+### PRE-REGISTERED: EXP-D7.1 — what the hardware holds vs the working reference
+
+*One variable: the corrected instrument. Nothing else changes about the image.*
+
+**Calibration gate (must pass before any conclusion is drawn):** the DUT dump must
+show `mdp_top+0x0 = 0x10020001` **and** a non-zero `LM0+0x4` **or** an explicit
+zero that is inside a window whose first line reads `0x00003100`. In other words,
+prove the window covers the register before interpreting its value.
+
+**Comparison:** DUT (kernel offsets) against
+`artifacts/fairphone2/oracle/20260806-tzdbg-mdp/mdp-working-reference-v2.txt`
+translated by −0x100.
+
+**Predictions, recorded before the run:**
+
+- **P1** If `LM0_OUT_SIZE` on the DUT is 0 while the oracle's is `0x07800438`, the
+  mixer was never given its geometry ⇒ the defect is in the CRTC/mixer programming
+  path, and `pp done` timing out is a consequence, not the cause.
+- **P2** If `LM0_OUT_SIZE` is correct but the **ping-pong** tear-check registers
+  differ from the oracle's, the defect is in `pingpong_tearcheck_setup()` or the
+  TE path, and the mixer is a red herring.
+- **P3** If both match the oracle and the pipes have a source, then the pipeline is
+  programmed correctly and nothing arrives anyway ⇒ escalate to the reassessment
+  council (blueprint P8); the remaining suspects are bus/QoS (D6) and the
+  interconnect rework (N1).
+- **P4** If the DUT's registers are largely zero *and* the calibration gate passes,
+  the commit path is not reaching hardware at all despite reporting success —
+  which contradicts the observed LM-blend change under paint, and would mean the
+  paint-time writes went somewhere else again. Treat as instrument failure first,
+  not as a hardware finding.
+
+**Not to be done until this returns:** no fix attempts, no DT edits, no further
+hypotheses. The next action after the dump is a diff, not a patch.
