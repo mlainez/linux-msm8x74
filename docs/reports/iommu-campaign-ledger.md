@@ -462,3 +462,75 @@ The 6.15-era ancestor of this work (April 2026, 8 commits: MDP/GPU/Venus IOMMU
 nodes, the wirings, defconfig, `pm_runtime_resume_and_get`, and the non-secure
 SCM/`INTR_SEL_NS` skip). It is **local-only — not on origin** — so unlike the nine
 branches retired today, a `git fetch` cannot bring it back. **Do not delete.**
+
+---
+
+## 2026-08-06 (panel focus) — the oracle's MDP5 reference does not exist, and D7 gets specific
+
+Operator directive: **make the panel work with drm/msm on 6.18 first.** Static
+work only, no device.
+
+### The evidence base has a hole exactly where the bug is
+
+`artifacts/fairphone2/oracle/20260731-mdp-regs/` was believed to hold the working
+stack's MDP register state. It does not:
+
+- **All four files are byte-identical** (`md5 7cc296b5…`). The offset/length
+  arguments were ignored; the same window was written four times.
+- That window is **16 lines (0x0..0xFF) with exactly one non-zero word**:
+  `10020001` at offset 0, i.e. MDP5 `HW_VERSION`. Everything else reads zero —
+  including `DISP_INTF_SEL` (+0x4) and `SMP_ALLOC_W` (+0x80, 8×4), which **cannot
+  both be zero on a display that is actively scanning out**. So the base/stride
+  was wrong as well as the offsets.
+- The **DSI capture is fine** (`oracle-dsi0.txt`, 168 non-zero words, plausible
+  lane/timing values), which is why "DSI matches the oracle" was a sound claim.
+
+Consequence: the D8 statement that "the oracle is the only referee" has a hole —
+for **MDP5**, the referee was never recorded. And MDP5 is precisely where the
+failure is bracketed: DSI matches, panel answers DCS, TE pulses, MDP5 commits and
+flushes, zero IOMMU faults, nothing on the glass.
+
+**Fixed for next time:** `~/Projects/msm8974-scratch/rig/mdpdump.sh` — dumps the
+authority-1 window set (`msm8974-mdss.dtsi`: MDP top, CTL0/1, VIG0/RGB0/DMA0
+pipes, LM0, DSPP0, INTF1, DSI0) and **refuses to pass silently**: it checks that
+the requested offset appears in the output, that a window has more than one
+non-zero word (else the MDSS clocks are off or the base is wrong), and that no two
+windows are identical — the exact 2026-07-31 failure. Syntax- and
+arithmetic-tested locally.
+
+### D7, made specific: two mechanisms produce "black, not garbage, with pp done"
+
+Both are invisible as faults, which fits every symptom we have:
+
+1. **SMP starvation.** MDP5 on this SoC has a Shared Memory Pool
+   (`MDP_CAP_SMP`; vendor `qcom,mdss-smp-data = <22 4096>`; the FP2's
+   `msm8x74_config` declares `mmb_count = 22, mmb_size = 4096` with per-client
+   allocations). If the pipe feeding the framebuffer has no/insufficient SMP
+   blocks allocated, it fetches nothing and **sends a black frame** — the transfer
+   completes, `pp done` fires, and the panel faithfully displays black. Read
+   `SMP_ALLOC_W/R` (+0x80 / +0x130) and compare against the pipe in use.
+2. **Layer never staged / mixer outputs border.** If `CTL_LAYER_n` does not stage
+   the pipe into the mixer, or `LM_BLEND_OP_MODE`/`LM_BORDER_COLOR` leave the
+   border showing, the mixer emits black regardless of what the pipe fetched. Read
+   `CTL_LAYER`, `CTL_FLUSH`, `LM_OUT_SIZE`, `LM_BLEND_OP_MODE`,
+   `LM_BORDER_COLOR`.
+
+Note which hypotheses this **demotes**: instrumenting DSI byte counters (the
+earlier D7 formulation) tests a later stage than the suspected one, and the
+"8 MB of /dev/urandom into /dev/fb0 changed nothing" observation is consistent with
+both mechanisms above — a pipe that fetches nothing, or a mixer that ignores it,
+produces black no matter what the buffer holds. Neither requires the IOMMU to be
+wrong, which is consistent with zero faults and with oracle-matching CB state.
+
+### Next actions for the panel, in order
+
+1. **Re-capture the oracle MDP5 state** with `mdpdump.sh` (display on, root) —
+   one command, self-verifying. This is the missing referee.
+2. **Dump the same windows from our failing 6.18 boot.** The MDP5 KMS snapshot
+   hook (`e6ed2bc74841`, on `6.18/topic/display-carveout`) already exists; extend
+   it to emit the same window set in the same format so the comparison is a diff,
+   not an interpretation.
+3. **Diff, and read SMP first.** If SMP allocation differs, that is the answer and
+   it is a driver fix, not an IOMMU one.
+4. Only then D6 (VBIF/QoS) and I8 (V7S vs LPAE), which remain queued and are
+   unaffected by this.
