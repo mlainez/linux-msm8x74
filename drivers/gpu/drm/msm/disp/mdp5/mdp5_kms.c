@@ -226,29 +226,49 @@ static void mdp5_kms_destroy(struct msm_kms *kms)
  * mdp5_smp_dump() in the atomic state dump; this prints what the hardware
  * actually holds, which is the part that decides whether a frame has content.
  */
-struct mdp5_reg_window {
-	const char *name;
-	u32 off;
-	u32 len;
-};
+/*
+ * Window bases come from the driver's own hardware config, never from a table
+ * typed in here.  The first version of this file hardcoded the offsets found in
+ * the vendor device tree (msm8974-mdss.dtsi), which are in a different
+ * numbering scheme: its LM0 is 0x3200 where this driver's is 0x3100, and its
+ * INTF1 is 0x21300 where this driver's is 0x12600.  Reads through
+ * mdp5_kms->mmio therefore landed outside the intended blocks and produced
+ * confident nonsense - LM_OUT_SIZE was never read at all, and an "INTF window"
+ * of zeroes was mistaken for a disabled timing engine.  mdp5_cfg is the same
+ * source the driver programs from, so this cannot drift from reality.
+ */
+static void mdp5_dump_window(struct seq_file *s, struct mdp5_kms *mdp5_kms,
+			     const char *name, int idx, u32 off, u32 len)
+{
+	int j;
 
-static const struct mdp5_reg_window mdp5_reg_windows[] = {
-	{ "mdp_top", 0x00000, 0x400 },	/* HW_VERSION, DISP_INTF_SEL, SMP_ALLOC_W/R */
-	{ "ctl0",    0x00600, 0x100 },	/* CTL_LAYER staging + CTL_FLUSH */
-	{ "ctl1",    0x00700, 0x100 },
-	{ "vig0",    0x01200, 0x200 },	/* SSPP: src addr/stride/format/size */
-	{ "rgb0",    0x01e00, 0x200 },
-	{ "dma0",    0x02a00, 0x200 },
-	{ "lm0",     0x03200, 0x200 },	/* LM_OUT_SIZE, blend, border colour */
-	{ "dspp0",   0x04600, 0x200 },
-	{ "intf1",   0x21300, 0x200 },	/* INTF1 = DSI0: timing + engine enable */
-};
+	seq_printf(s, "# window=%s%d offset=0x%05x len=0x%x\n", name, idx, off, len);
+	for (j = 0; j < len; j += 16)
+		seq_printf(s, "0x%08x: %08x %08x %08x %08x\n",
+			   off + j,
+			   mdp5_read(mdp5_kms, off + j),
+			   mdp5_read(mdp5_kms, off + j + 4),
+			   mdp5_read(mdp5_kms, off + j + 8),
+			   mdp5_read(mdp5_kms, off + j + 12));
+}
+
+static void mdp5_dump_sub_block(struct seq_file *s, struct mdp5_kms *mdp5_kms,
+				const char *name, unsigned int count,
+				const u32 *base, u32 len)
+{
+	unsigned int i;
+
+	for (i = 0; i < count && i < MAX_BASES; i++)
+		if (base[i])
+			mdp5_dump_window(s, mdp5_kms, name, i, base[i], len);
+}
 
 static int mdp5_regs_show(struct seq_file *s, void *unused)
 {
 	struct mdp5_kms *mdp5_kms = s->private;
 	struct device *dev = &mdp5_kms->pdev->dev;
-	int i, j, ret;
+	const struct mdp5_cfg_hw *hw = mdp5_cfg_get_hw_config(mdp5_kms->cfg);
+	int ret;
 
 	/*
 	 * mdp5_read() warns if the block is not enabled, and reading an
@@ -262,20 +282,32 @@ static int mdp5_regs_show(struct seq_file *s, void *unused)
 		return 0;
 	}
 
-	for (i = 0; i < ARRAY_SIZE(mdp5_reg_windows); i++) {
-		const struct mdp5_reg_window *w = &mdp5_reg_windows[i];
+	/* MDP top: HW_VERSION, DISP_INTF_SEL, SMP_ALLOC_W/R, QoS/danger LUTs */
+	mdp5_dump_window(s, mdp5_kms, "mdp_top", 0, 0x0, 0x400);
 
-		seq_printf(s, "# window=%s offset=0x%05x len=0x%x\n",
-			   w->name, w->off, w->len);
+	/* CTL: LAYER staging + FLUSH, one window per CTL */
+	mdp5_dump_sub_block(s, mdp5_kms, "ctl", hw->ctl.count, hw->ctl.base, 0x100);
 
-		for (j = 0; j < w->len; j += 16)
-			seq_printf(s, "0x%08x: %08x %08x %08x %08x\n",
-				   w->off + j,
-				   mdp5_read(mdp5_kms, w->off + j),
-				   mdp5_read(mdp5_kms, w->off + j + 4),
-				   mdp5_read(mdp5_kms, w->off + j + 8),
-				   mdp5_read(mdp5_kms, w->off + j + 12));
-	}
+	/* SSPP: src addr/stride/format/size live in the first 0x40 bytes */
+	mdp5_dump_sub_block(s, mdp5_kms, "vig", hw->pipe_vig.count,
+			    hw->pipe_vig.base, 0x100);
+	mdp5_dump_sub_block(s, mdp5_kms, "rgb", hw->pipe_rgb.count,
+			    hw->pipe_rgb.base, 0x100);
+	mdp5_dump_sub_block(s, mdp5_kms, "dma", hw->pipe_dma.count,
+			    hw->pipe_dma.base, 0x100);
+
+	/* LM: OUT_SIZE, blend stages, border colour */
+	mdp5_dump_sub_block(s, mdp5_kms, "lm", hw->lm.count, hw->lm.base, 0x100);
+
+	/*
+	 * PP (ping-pong) and INTF: on a command-mode panel the ping-pong block
+	 * with its tear-check is what actually drives the transfer, so a dump
+	 * without it cannot say anything about why "pp done" timed out. Missing
+	 * from the first version of this instrument.
+	 */
+	mdp5_dump_sub_block(s, mdp5_kms, "pp", hw->pp.count, hw->pp.base, 0x100);
+	mdp5_dump_sub_block(s, mdp5_kms, "intf", ARRAY_SIZE(hw->intf.base),
+			    hw->intf.base, 0x100);
 
 	pm_runtime_put_sync(dev);
 
