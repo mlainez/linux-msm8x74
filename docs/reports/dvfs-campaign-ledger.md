@@ -1997,3 +1997,72 @@ Recorded here because the tree is right but the reason was nowhere: the revert
   (GIC SPI 221) increment in `/proc/interrupts` while the empty slot is polled,
   on 6.12 and on 6.18? If it never increments, the interrupt/mask path is the
   target; if it increments, the wait/state bookkeeping is.
+
+---
+
+# 2026-08-06 — BOINC REAL-LOAD TEST ON THE 6.12 DVFS KERNEL: PASS (with caveats)
+
+First test of the validated 6.12 DVFS/thermal stack under a genuine distro
+userspace and a real scientific workload, rather than our synthetic soak.
+
+**Setup.** Carrier rig, vanilla Ubuntu 26.04 (debos nightly, unmodified image)
+flashed to `userdata`; our kernel installed **via apt** from the citronics APT
+repo (`linux-image-6.12.101-citronics-lime-fp2`, locally rebuilt as `3.2~rc3.17`
+after the config fix below); rig DTB selected by `/etc/deviceinfo`; BOINC attached
+through **Science United** to SiDock@home (ebola_RdRp docking), all four cores.
+
+**Result: 3 h 56 min continuous uptime, no unexplained reset.** Three boots
+recorded, all ours (`PS_HOLD` = deliberate reboots). 489 telemetry samples over
+4 h 11 min.
+
+| Measure | Value |
+|---|---|
+| distinct OPPs exercised | **13** (300 MHz … 1958.4 MHz observed) |
+| governor | schedutil, four independent policies |
+| max zone temperature | **88 °C** (the second passive trip — governor holding there) |
+| cooling-device states under load | 7–11 of 13, per-core, continuously rebalanced |
+| load | 4.1–4.3, four `sidock` processes at ~96.8 % CPU each |
+| BOINC tasks | 6 completed, 4 executing |
+| USBIN under load | 4.75–4.93 V |
+
+**Four defects had to be fixed before the workload would run at all**, none of
+them in the DVFS stack itself:
+
+1. **`CONFIG_KRAITCC` and `CONFIG_QCOM_HFPLL` missing from
+   `citronics-kernel/configs/msm8x74-6.12-rc.config`** (my error when deriving it
+   from the retired config). Without them the CPU clock provider never probes,
+   `dev_pm_opp_set_config()` fails (`cpu cpu0: Failed to set OPP config`) and
+   **there is no cpufreq at all** — with a perfectly correct device tree. Fixed and
+   pushed (`2d5d0ed`/`6efa802`); **the published `3.2~rc3.16` deb has no DVFS
+   drivers and needs a CI rebuild.**
+2. DNS: `/etc/resolv.conf` is systemd-resolved's stub, so a direct write is
+   reverted; BOINC then failed with `can't resolve hostname`.
+3. The default route did not survive a reboot (now a `rig-nat-route.service`), and
+   the host's gadget interface renames between images (`enp12s0u5i1` RNDIS →
+   `enp12s0u5` cdc_ether).
+4. BOINC suspended on "batteries" (`smbb-bif: type=Battery status=Discharging
+   present=0` on a board with no pack) — fixed with `run_on_batteries` in
+   `global_prefs_override.xml`; and every task failed in 5 s with `compute error`
+   until **`libgomp1`** was installed (the app is genuine armhf ELF; its own stderr
+   named the missing library, after I had wrongly guessed "no armhf app").
+
+**Caveats on the verdict:**
+
+- **Thermally bound, not power bound.** A bare board on a carrier with no chassis
+  sits against the 88 °C trip continuously, so this frequency distribution is a
+  throttled one. A real FP2 with its case and battery mass would spend more time at
+  higher OPPs. Do not read this as the ladder's real-world behaviour.
+- **The TSENS storm is now measured under real load:** `irq/58-fc4a9000.thermal-sensor`
+  burns ~25 % of a core, with **7,251,351** interrupts over the run (~500/s). That
+  is pure overhead from the ack/re-arm defect we have confirmed three times is
+  unfixed upstream (6.16, 6.19, 7.1).
+- 4 h is not a multi-day soak, and the `min USBIN` figure in the log (1.2499 V) is
+  from the pre-fix boots where the telemetry globbed the wrong ADC channel — the
+  channel is now pinned to USBIN explicitly. Post-fix samples read 4.75–4.93 V.
+
+**Conclusion.** The 6.12 DVFS + thermal stack survives a real multi-hour four-core
+workload on a distro userspace with the full frequency range active and thermal
+throttling engaged, with no silent reset. That is the first evidence outside our own
+soak harness. The remaining gate to `6.12/release` is unchanged and unrelated:
+**validation on a phone with a battery**, where the charger's presence-vs-`bat_ready`
+split and charge engage/terminate have never been exercised.
