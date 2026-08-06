@@ -902,3 +902,71 @@ acceptable: the display is already black, and this run is a diagnostic, not a fi
   becomes the reference for what a TE-emitting panel looks like.
 - **R3** edges at a wrong rate (not ~60 Hz) ⇒ the panel emits something else; treat
   as (b) but suspect the mode/timing rather than the latch.
+
+---
+
+## 2026-08-06 (close) — EXP-D7.3 COMPLETE: R2. The panel does not emit TE.
+
+DT-only diagnostic, no kernel rebuild (build-economy rule): `gpio12` re-muxed from
+`mdp_vsync` to `gpio` and given a `gpio-keys` edge counter, patched into the DTB
+with `fdtput` and verified by decompiled diff. Captures:
+`artifacts/fp2-dut/20260806-expd73/`.
+
+**Two of my own errors caught by the gate, worth recording:**
+
+1. First attempt used `gpios = <0x1d 0xc 0x0>` because `fdtget -t x` printed `29`
+   and I read it as decimal. `-t x` already prints hex, so the tlmm phandle is
+   **0x29** (decimal 41); 0x1d is RPM regulator `l20`. The kernel said so exactly:
+   `OF: /gpio-keys/te-debug: could not get #gpio-cells for /remoteproc/.../l20`,
+   then `gpio-keys: probe failed with error -22`. A bad child node takes the whole
+   `gpio-keys` node down, which is also why the FP2's volume keys vanished — I had
+   guessed that was independent of my change; it was not.
+2. `make -C output-618obs rootfs-ext2` regenerates `rootfs.ext2` but **does not**
+   re-run the post-image step, so `sdcard.img` stayed stale. Flashing it would have
+   tested the unpatched DTB. Repack with
+   `PATH=$O/host/bin:$PATH BINARIES_DIR=... buildroot/support/scripts/genimage.sh -c <cfg>`
+   and verify the DTB *inside the image* before every flash.
+
+**Verification gate PASSED:** `input: gpio-keys as /devices/platform/gpio-keys/input/input0`
+with no probe failure; `pin 12 (GPIO_12): device fd922800.dsi.0 function gpio group gpio12`;
+and IRQ **69** armed as `msmgpio 12 Edge  panel-te-debug`.
+
+**Measurement: 0 -> 0 edges over 5 s = 0 Hz.**
+
+**Verdict R2: the panel never emits TE.** Candidate (b) — "emitted but not latched by
+the MDP" — is excluded: the line is electrically quiet. The defect is on the panel
+side of the wire, in the init/TE-command path.
+
+### Campaign state at close of 2026-08-06
+
+**Track A (display, DUT).** CP0a instruments now trustworthy and calibrated; the
+failure is localised to a single missing signal. The chain of eliminations, all by
+measurement: IOMMU (zero faults, oracle-identical CB state, BFB programmed), SMP
+allocation, mixer geometry, the whole PP register set except one value which was
+tested and reverted, the vsync clock, the CTL category, DT and runtime pin muxing,
+and now the MDP latch itself. What remains is: **the OTM1902B does not drive its TE
+line, although the panel driver sends `set_tear_on(VBLANK)` and the panel otherwise
+answers.**
+
+**Where tomorrow starts** — the panel side, in this order:
+1. Does the panel's init sequence actually complete? Compare our generated
+   OTM1902B on-sequence against the vendor's `dsi-panel-otm1902b-1080p-cmd.dtsi`
+   command blob, command by command, including ordering and the DCS `0x35`
+   parameter. The vendor also sets `qcom,mdss-dsi-te-dcs-command = <1>` and
+   `qcom,mdss-dsi-wr-mem-start/continue = 0x2c/0x3c`.
+2. Is `set_tear_on` reaching the panel at all, and is it ACKed? Instrument the DSI
+   command path, or read the panel's own status via DCS.
+3. Does TE require a panel rail/GPIO we do not drive (reset ordering, or the
+   panel's own TE enable pin)?
+4. Authority 2 is available and now known-good: the oracle emits TE, so its DSI
+   register set and panel command log are the reference.
+
+**Track B (XPU).** The referee exists (Android: XPU interrupts `0xe3`/`0xe4`, count
+zero on all CPUs; TZ reset counters zero). O1 (our own TZ-log reader) and X3
+(deliberate violation for calibration) are still unwritten; CP1 cannot start
+without them, and the CP0 gate will not be skipped again.
+
+**Instruments that survive the day, all now trustworthy:** `mdp5_regs` with
+cfg-derived windows including ping-pong; `mdpdump.sh` with self-checks; the
+vendor-offset translation rule (`vendor = kernel + 0x100`); the requirement that
+oracle register captures be bracketed by a display-state check.
