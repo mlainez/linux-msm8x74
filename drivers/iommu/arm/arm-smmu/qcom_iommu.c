@@ -134,6 +134,8 @@ struct qcom_iommu_dev {
 	 * SMMU needs them exactly as much as the non-secure GPU one.
 	 */
 	bool			 is_msm8974;
+	/* "qcom,iommu-enable-halt": HLOS may halt this SMMU (vendor key). */
+	bool			 halt_enabled;
 	struct delayed_work	 dbg_work;   /* DEBUG: CB state dump */
 	bool			 bfb_written;
 	u8			 max_asid;
@@ -451,6 +453,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	struct io_pgtable_ops *pgtbl_ops = NULL;
 	struct io_pgtable_cfg pgtbl_cfg;
 	bool use_v7s = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
+	bool halted = false;
 	int i, ret = 0;
 	u32 reg;
 
@@ -535,6 +538,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			qcom_iommu_glb_resume(qcom_iommu);
 			goto out_err;
 		}
+		halted = true;
 		if (!qcom_iommu->glb_inited) {
 			qcom_iommu_glb_reset(qcom_iommu);
 			qcom_iommu->glb_inited = true;
@@ -563,6 +567,34 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 			}
 			ctx->secure_init = true;
 			qcom_iommu_write_bfb(qcom_iommu);
+		}
+
+		/*
+		 * Halt the SMMU around context-bank programming, which is what
+		 * the vendor does on this instance and what this driver
+		 * previously did only for non-secure ones. The downstream
+		 * sequence (msm_iommu-v1.c __attach_iommu, ~line 745) is:
+		 * msm_iommu_sec_program_iommu() -> program_iommu_bfb_settings()
+		 * -> iommu_halt() -> __program_context(), i.e. the halt is
+		 * *not* gated on is_secure -- only the detach-time halt is.
+		 * Reprogramming a context bank while the MMU still has
+		 * transactions in flight is the failure this prevents.
+		 *
+		 * Vendor timeout semantics deliberately: iommu_halt() logs and
+		 * continues rather than aborting, so a busy SMMU degrades to
+		 * the previous (un-halted) behaviour instead of failing the
+		 * attach and taking the display down with it.
+		 */
+		if (!halted && qcom_iommu->halt_enabled) {
+			if (qcom_iommu_glb_halt(qcom_iommu)) {
+				/* Clear the latched request before continuing. */
+				qcom_iommu_glb_resume(qcom_iommu);
+				dev_warn(qcom_iommu->dev,
+					 "programming context %u un-halted\n",
+					 ctx->asid);
+			} else {
+				halted = true;
+			}
 		}
 
 		/* Secured QSMMU-500/QSMMU-v2 contexts cannot be programmed */
@@ -661,15 +693,22 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		ctx->domain = domain;
 	}
 
-	if (qcom_iommu->nonsecure) {
+	if (halted)
 		qcom_iommu_glb_resume(qcom_iommu);
-	}
 
 	mutex_unlock(&qcom_domain->init_mutex);
 
 	return 0;
 
 out_err:
+	/*
+	 * Release the halt on every error exit. Previously a failure after the
+	 * non-secure halt (a failed restore_sec_cfg, say) returned with
+	 * HALT_REQ still latched, leaving the SMMU halted for good.
+	 */
+	if (halted)
+		qcom_iommu_glb_resume(qcom_iommu);
+
 	if (pgtbl_ops) {
 		/*
 		 * First finalization failed: unwind the state set above so a
@@ -1289,6 +1328,15 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 
 	qcom_iommu->is_msm8974 = of_device_is_compatible(dev->of_node,
 							 "qcom,msm8974-iommu");
+
+	/*
+	 * The vendor gates halting on this exact property and sets it on both
+	 * MSM8974 MMSS instances, the TrustZone-managed MDP one included
+	 * (msm8974-v2-iommu.dtsi). Reading it here rather than deriving it from
+	 * the security model keeps that decision where the vendor put it.
+	 */
+	qcom_iommu->halt_enabled = of_property_read_bool(dev->of_node,
+							 "qcom,iommu-enable-halt");
 
 	if (qcom_iommu_has_secure_context(qcom_iommu)) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
