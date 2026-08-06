@@ -2131,6 +2131,13 @@
 			interconnects = <&mmssnoc MNOC_MAS_MDP_PORT0 &bimc BIMC_SLV_EBI_CH0>;
 			/* TrustZone owns the global space / stream mapping. */
 			qcom,iommu-secure-id = <1>;
+			/*
+			 * HLOS may halt this SMMU around context-bank
+			 * programming, and the vendor does: the property is set
+			 * on both MMSS instances in msm8974-v2-iommu.dtsi, the
+			 * TZ-managed MDP one included.
+			 */
+			qcom,iommu-enable-halt;
 			/* Vendor fetch/prefetch tuning (msm8974-v2-iommu.dtsi). */
 			qcom,iommu-bfb-regs =  <0x204c 0x2050 0x2514 0x2540
 						0x256c 0x20ac 0x215c 0x220c
