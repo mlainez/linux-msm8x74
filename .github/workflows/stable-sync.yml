@@ -1,7 +1,10 @@
 name: stable-sync
 
-# Keep 6.18/staging and 6.18/rc up to date with mainline LTS security
-# patches (linux-6.18.y). Clean merges are pushed directly; a conflict
+# Keep the integration branches of every maintained series up to date with
+# their mainline LTS branch. Two series are maintained in parallel (AGENTS.md
+# section 1): 6.12 (production baseline, display works via the drm/msm vram
+# carveout) and 6.18 (LTS-tracking work, display unsolved - see
+# docs/reports/6.18-display-findings.md). Clean merges are pushed directly; a conflict
 # opens an issue and leaves the branch untouched (resolve it manually on
 # a topic/integration round). See AGENTS.md §5.
 
@@ -22,9 +25,21 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     strategy:
-      max-parallel: 1        # staging first, then rc — never in parallel
+      max-parallel: 1        # one branch at a time, never in parallel
       matrix:
-        branch: ['6.18/staging', '6.18/rc']
+        include:
+          - branch: '6.12/baseline'
+            stable: 'linux-6.12.y'
+          - branch: '6.12/staging'
+            stable: 'linux-6.12.y'
+          - branch: '6.12/rc'
+            stable: 'linux-6.12.y'
+          - branch: '6.18/baseline'
+            stable: 'linux-6.18.y'
+          - branch: '6.18/staging'
+            stable: 'linux-6.18.y'
+          - branch: '6.18/rc'
+            stable: 'linux-6.18.y'
     steps:
       - name: Checkout ${{ matrix.branch }}
         uses: actions/checkout@v4
@@ -33,10 +48,10 @@ jobs:
           fetch-depth: 0
           filter: blob:none
 
-      - name: Fetch stable linux-6.18.y
+      - name: Fetch stable ${{ matrix.stable }}
         run: |
           git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
-          git fetch --no-tags stable linux-6.18.y
+          git fetch --no-tags stable ${{ matrix.stable }}
 
       - name: Merge stable into ${{ matrix.branch }}
         id: merge
@@ -74,5 +89,5 @@ jobs:
             echo "Issue already open."
           else
             gh issue create --title "$TITLE" --body \
-              "Automated merge of stable \`linux-6.18.y\` (${{ steps.merge.outputs.stable_desc }}) into \`${{ matrix.branch }}\` hit conflicts and was aborted. Resolve manually per AGENTS.md §5, then re-run the workflow."
+              "Automated merge of stable \`${{ matrix.stable }}\` (${{ steps.merge.outputs.stable_desc }}) into \`${{ matrix.branch }}\` hit conflicts and was aborted. Resolve manually per AGENTS.md §5, then re-run the workflow."
           fi
