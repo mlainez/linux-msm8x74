@@ -660,3 +660,87 @@ translated by −0x100.
 
 **Not to be done until this returns:** no fix attempts, no DT edits, no further
 hypotheses. The next action after the dump is a diff, not a patch.
+
+---
+
+## 2026-08-06 (late) — CP0a oracle extraction (plan §5) mostly COMPLETE
+
+Working the ladder instead of free-running experiments. The oracle is the scarce
+asset (it disappeared once tonight), so §5 was completed while it was up. Root
+works, display forced awake (`svc power stayon true`), every register capture
+**bracketed** with a display-state check either side.
+
+| §5 item | Status | Artifact |
+|---|---|---|
+| 1–2 tzdbg interrupts/reset/boot/log | **done** | `tz-*.txt` |
+| 3 MDP registers, working reference | **done** (bracketed) | `mdp-working-reference-v2.txt`, `mdp-wide-sweep.txt` |
+| 4 MDP/BIMC QoS as Android leaves them | **done** | `oracle-mdp-qos.txt` |
+| 5 `/proc/iomem` + PIL regions | **done** | `oracle-iomem.txt`, `oracle-pil-regions.txt` |
+| 6 XPU arming in the vendor boot log | **inconclusive** — early-boot lines have rotated out of dmesg | — |
+| MDP SMMU CB/global state | **not attempted, deliberately** | see below |
+
+**SMMU CB state on the oracle is deliberately not captured.** The only route is
+`/dev/mem` against a TrustZone-owned window, and this project already knows that
+reading protected regions that way resets the SoC ([[devmem-xpu-hazard]]). Losing
+the oracle to satisfy an audit item is a bad trade; CP3 will compare CB state
+using the DUT's own dump plus the vendor source instead.
+
+### H2 refined with exact addresses — the vendor hole is where ADSP and WCNSS live
+
+Android's own PIL log settles what the vendor puts in the window mainline leaves
+allocatable:
+
+```
+adsp:   0x05a00000 -> 0x06e00000   (20 MB)
+wcnss:  0x06e00000 -> 0x073b0000   (5.7 MB)
+modem:  0x08000000 -> 0x0d100000   (80 MB)
+mba:    0x0d100000 -> 0x0d149000
+/proc/iomem: System RAM 00000000-059fffff, 0d200000-0f9fffff, 0ff00000-7f6fffff
+```
+
+So the vendor's RAM hole is exactly its **ADSP + WCNSS** firmware area, and
+mainline relocates those two remoteprocs to `0x0d200000` / `0x0dc00000` while
+leaving `0x05a00000..0x073b0000` to the page allocator. Mainline's `mpss@8000000`
+(0x5100000) and `mba@d100000` match Android's modem/mba regions **exactly**, which
+is a useful cross-check that the rest of the map is right.
+
+This supersedes the DT-derived numbers in the M2 audit: the authoritative bounds
+come from the vendor's own loader, not from `qcom,memblock-remove`. It does **not**
+prove anything is XPU-locked there under our kernel — only O1 on our side can —
+but it does mean the window is not merely "reserved for tidiness": it is where a
+TZ-authenticated image is placed on the vendor stack.
+
+### D6 upgraded from hypothesis to measured target values
+
+The vendor's `qcom,mdp-settings` are **live in hardware** on the working device
+(read through the vendor's own debugfs, so no addressing ambiguity):
+
+```
+vendor 0x2e0: 000000e9 00000055 00000038 00000001   (DT: 0x2E0=0xE9, 0x2E4=0x55)
+vendor 0x3ac: c0000ccc 00004c3c c0000ccc 00004c7c   (DT: 0x3AC/0x3B4=0xC0000CCC)
+vendor 0x3bc: 00cccccc                              (DT: 0x3BC=0x00CCCCCC)
+```
+
+Our DUT at the corresponding kernel offsets (0x1e0 = vendor 0x2e0, per the
+translation rule) holds `000000e9 000000e4 00000038 00000001` — three words equal,
+one differing (`0xe4` where the vendor has `0x55`).
+
+**Careful reading:** mainline's mdp5 writes *nothing* in this block (its only
+`SPARE_0` write is the single-flush path, which does not apply at v1.2), so every
+value the DUT shows there is **pre-Linux residue** from lk2nd's splash or reset
+defaults. The three matches are therefore not evidence that mainline programs
+these registers — they are coincidence. What this capture does provide is the
+**exact target state** for the D6 port and a read-back check to verify it.
+
+### Where the ladder now stands
+
+- **CP0a: still NOT passed.** Oracle extraction is done, but the DUT-side
+  instrument failed calibration (previous entry) and its corrected version
+  (`32253dc052c3`) is compile-tested only. CP0a passes when EXP-D7.1's calibration
+  gate passes on-device.
+- **CP0b (Track B):** the oracle half is done — the referee shows zero XPU counts.
+  The O1 reader for our own kernel is still unwritten, and X3 (deliberate violation
+  for calibration) is untried. Track B cannot start without them, and after
+  tonight's lesson that gate will not be skipped again.
+- **Next action, unchanged:** run EXP-D7.1 as pre-registered — rebuild with the
+  corrected instrument, one flash, dump, then **diff, not patch**.
