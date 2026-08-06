@@ -744,3 +744,80 @@ these registers — they are coincidence. What this capture does provide is the
   tonight's lesson that gate will not be skipped again.
 - **Next action, unchanged:** run EXP-D7.1 as pre-registered — rebuild with the
   corrected instrument, one flash, dump, then **diff, not patch**.
+
+---
+
+## 2026-08-06 (night) — EXP-D7.1 COMPLETE: P1 refuted, P2 confirmed
+
+Image: `output-618obs/images/sdcard.img`, kernel `6.18.41` =
+`6.18/topic/mdp5-regdump` @ `32253dc052c3` (corrected instrument, cfg-derived
+windows + ping-pong), display DTB, DVFS off, WCNSS firmware removed. DUT
+`e4f4c070`. Captures: `artifacts/fp2-dut/20260806-expd71/`.
+
+**Calibration gate PASSED** (the thing skipped last time): 26 windows emitted at
+the driver's own bases, `mdp_top+0x0 = 0x10020001`, and the `lm0` window starts at
+`0x00003100` so `LM0+0x4` is provably inside it.
+
+**P1 REFUTED.** `LM0_OUT_SIZE = 0x07800438` (1920x1080) on our DUT — *identical to
+the oracle*. The mixer has its geometry. My earlier "OUT_SIZE = 0" was wrong twice
+over (never read, then wrongly re-derived).
+
+Also killed by the corrected dump: "no pipe has a source" — `rgb0` shows 12
+non-zero words and `dma0` 15. And the CTL blocks are at `0x500..0x900`, so the old
+"ctl0 = 0x600" window had been reading CTL1.
+
+**P2 CONFIRMED.** Mixer correct, ping-pong tear-check differs — two words, in a
+block where everything else matches exactly:
+
+```
+          +0x00     +0x04     +0x08     +0x0c    +0x10     +0x14     +0x18     +0x1c
+DUT     00000001 001800a5 00000f20 00000000 00000780 000002df 00040004 00000780
+oracle  00000001 001800a5 0000fff0 00000000 00000780 073b0782 00040004 00000780
+                          ^^^^^^^^                   ^^^^^^^^
+```
+
+`+0x08` is `PP_SYNC_CONFIG_HEIGHT`: ours `0x0f20` (= 2 x vtotal = 3872), the
+vendor's `0xfff0`. `+0x14` is `PP_INT_COUNT_VAL`, a live counter — expected to
+differ. `TEAR_CHECK_EN`, `SYNC_CONFIG_VSYNC`, `VSYNC_INIT_VAL`, `SYNC_THRESH`
+(4/4) and `START_POS` all match.
+
+**Authority 1 explains both sides.** `mdss_dsi_panel.c:733`:
+`panel_info->te.sync_cfg_height = (!rc ? tmp : 0xfff0)` — and the FP2's own panel
+file (`dsi-panel-otm1902b-1080p-cmd.dtsi`) sets `qcom,mdss-dsi-te-check-enable`
+and `qcom,mdss-dsi-te-using-te-pin` while specifying **no** tear-check parameters,
+so the vendor default `0xfff0` is what this panel runs with. Mainline instead
+writes `2 * mode->vtotal` with a comment stating it is "only necessary as
+stability fallback if interrupts from the panel arrive too late or not at all, but
+is currently used by default **because these panel interrupts are not wired up
+yet**" (`mdp5_cmd_encoder.c:57-63`).
+
+So mainline configures a tight internal-counter fallback *and* admits the TE
+interrupt path is unwired, on a panel the vendor drives with TE and an effectively
+disabled counter. That is a coherent mechanism for `pp done time out, lm=0`.
+
+### PRE-REGISTERED: EXP-D7.2 — vendor parity for SYNC_CONFIG_HEIGHT
+
+**One variable.** `REG_MDP5_PP_SYNC_CONFIG_HEIGHT` from `2 * mode->vtotal` to
+`0xfff0`. Nothing else changes: same image, same DTB, instrument still present so
+the register can be read back.
+
+**Two candidate variables exist and must not be combined:** (a) this height value,
+(b) wiring the panel TE interrupt that mainline's comment says is missing. (b) is
+deliberately *not* attempted in this experiment.
+
+**Verification before interpretation:** the dump must show `pp0+0x08 = 0x0000fff0`.
+If it does not, the change did not take and the run is void.
+
+**Predictions:**
+
+- **Q1** `pp done time out, lm=0` disappears from dmesg ⇒ the tight fallback
+  counter was pre-empting the transfer; proceed to check whether pixels appear.
+- **Q2** The timeout disappears **and** the panel shows content ⇒ this is the fix
+  for CP6's first half; write it up as a mainline-shaped patch (the value belongs
+  in the DT/panel description, not hardcoded).
+- **Q3** The timeout disappears but the screen stays black ⇒ the transfer now
+  completes but nothing arrives; the next suspect is the pipe/CTL flush path, with
+  D6 (bus QoS) behind it.
+- **Q4** The timeout persists unchanged ⇒ the height is not the mechanism; the TE
+  interrupt path (b) becomes the single variable for EXP-D7.3, and this change is
+  reverted rather than left in.
