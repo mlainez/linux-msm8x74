@@ -76,3 +76,64 @@ the 6.16 fork's MDSS/IOMMU DT as the closest working SMMU reference.
 - If counts stay **flat** through a reset, the err-fatal correlation is a
   confound and the whole XPU thread is misframed — that outcome must be
   recorded as such, not explained away.
+
+---
+
+## 2026-08-06 — 6.18 branch set reduced to the campaign, and one retraction
+
+No device access this session, so this is bookkeeping plus one static
+verification that changed a decision.
+
+**Verified (authority 4, our own history):** the 6.12 line is a **strict superset
+of the 6.18 clk work.** `clk-hfpll.c` is byte-identical between `6.12/rc` and
+`6.18/rc` (so the lock-poll polarity, atomic bound, mode-register mask and
+spinlock fixes are in both); `krait-cc.c` has **91 more lines** on 6.12 and
+`hfpll.c` 12 more. On top of that, 6.12 carries two clk commits 6.18 never got
+(`b306ead1660b` inverted secondary-mux parent order, `a17470165b1c` the lockable
+`L_VAL` seed) and the whole validated SPM chain (gang-rail support, the
+preempt-disabled write, PWM/4-phase boot, **`c1076b55dd05`** "only cache a
+voltage selector the PMIC confirmed", the rail counters) plus the APC sequencer.
+
+**Retraction:** earlier today the `L_VAL` seed was cherry-picked to
+`6.18/topic/krait-clk-fixes` "so the fix is not lost". That was churn on a
+non-problem — the fix is on 6.12, which is where the DVFS stack will be taken
+from at CP7a. The cherry-pick and its branch are retired.
+
+**Retired (local refs only; every one still on `origin`, nothing was pushed, so
+`git fetch` restores any of them):**
+
+| Branch | Why |
+|---|---|
+| `6.18/test/l2-rate-pin` | throwaway `[TEST BRANCH]` L2 rate pin, per the naming convention |
+| `6.18/topic/l2-saw-regulator-only` | 3 WIP idle-reset experiments, superseded by `c1076b55dd05` |
+| `6.18/topic/cx-corner-idle-reset` | a revert of a 6.18 DVFS experiment; its one useful commit (the CI 6.12/rc watch) was carried to `6.18/staging` first |
+| `6.18/topic/krait-clk-fixes` | superseded per above (and the day's redundant cherry-pick) |
+| `6.18/topic/hfpll-lock-poll` | its fixes are in both series already |
+| `6.18/topic/spm-voltage-fixes` | superseded by the 6.12 SPM chain |
+| `6.18/topic/dvfs-spm` | the 6.18 DVFS attempt, including two reverted margin probes |
+| `6.18/topic/cpufreq-cx-corner` | CX-corner experiments, one already reverted |
+| `6.18/topic/android-dvfs-parity` | OPP/CX-domain parity experiments |
+
+Their commits remain in `6.18/staging` history; only the refs are gone. **When
+the remote is tidied** (needs a push, deliberately not done):
+`git push origin --delete <each of the nine>`.
+
+**Kept, and why:** `baseline`, `staging`, `rc`; the display campaign —
+`fp2-panel`, `mdp-iommu`, `display-carveout` (misnamed: its unique content is the
+MDP5 KMS snapshot hook, the carveout revert was abandoned); the display's
+prerequisites — `smd-rpm-clocks`, `mmcc-mmssnoc-fix`; `gpu-iommu` (shares the
+qcom-iommu driver with the MDP instance); `adsp-sensors`; the instruments —
+`pon-reason`, `reset-forensics`, `xpu-err-fatal`; and `ci-dispatch-guard`.
+
+**Consequence for the plan:** CP7a is now unambiguous — 6.18 gets its DVFS by
+merging the 6.12 topics, not by reviving anything on the 6.18 side. Nothing that
+was retired needs to be read again.
+
+**Also found while auditing the display half (authority 5, static):** 6.18's
+drm/msm has **no VBIF support for MDP5 at all** — `vbif` appears only in the
+`dpu1` catalogs, and `mdp5_kms.c` maps a single register window (`mdp_phys`),
+while the vendor's MDSS node declares `reg-names = "mdp_phys", "vbif_phys"`. So
+D6 (§2.8 of the plan) is not a matter of writing eight values: **the VBIF window
+is not even mapped on this path**, and the port has to add the register range to
+the DT and the driver first. Recorded before writing any code, because it changes
+D6 from "program a table" to "add a register window, then program a table".
