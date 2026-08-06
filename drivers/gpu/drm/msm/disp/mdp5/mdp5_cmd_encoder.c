@@ -57,23 +57,10 @@ static int pingpong_tearcheck_setup(struct drm_encoder *encoder,
 	 * This is only necessary as stability fallback if interrupts from the
 	 * panel arrive too late or not at all, but is currently used by default
 	 * because these panel interrupts are not wired up yet.
-	 *
-	 * EXP-D7.2 (msm8974/FP2, command-mode OTM1902B): use the vendor's value
-	 * instead. Read from a working Android stack on this exact panel, the
-	 * hardware holds 0xfff0 here while this driver programs 2 * vtotal
-	 * (0x0f20); every other word in the ping-pong block already matches.
-	 * mdss_dsi_panel.c:733 defaults te.sync_cfg_height to 0xfff0 and the FP2's
-	 * panel file specifies no tear-check parameters, so 0xfff0 is what this
-	 * panel is driven with downstream - i.e. the internal counter is
-	 * effectively disabled and TE alone paces the transfer. With the tight
-	 * fallback this driver hits "pp done time out, lm=0" on the first frame.
-	 *
-	 * NOT a submittable form: the value belongs in the panel description, not
-	 * hardcoded, and the real gap is the unwired TE interrupt named above.
 	 */
 	mdp5_write(mdp5_kms, REG_MDP5_PP_SYNC_CONFIG_VSYNC(pp_id), cfg);
 	mdp5_write(mdp5_kms,
-		REG_MDP5_PP_SYNC_CONFIG_HEIGHT(pp_id), 0xfff0);
+		REG_MDP5_PP_SYNC_CONFIG_HEIGHT(pp_id), (2 * mode->vtotal));
 
 	mdp5_write(mdp5_kms,
 		REG_MDP5_PP_VSYNC_INIT_VAL(pp_id), mode->vdisplay);
