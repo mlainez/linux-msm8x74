@@ -342,6 +342,23 @@ Oracle numbers to capture (authority 2, CP0):
   TZ-managed instance, and what TZ expects to keep (open).
 - **I7** GPU instance interaction: both instances live at once (open).
 
+### Layer N — Bus / interconnect (added 2026-08-06 from the 7.x sweep)
+
+- **N1 adopt the upstream msm8974 interconnect rework** (`docs/analysis/UPSTREAM-SWEEP-msm8974.md` §6):
+  9 interconnect/binding commits + the DT bus-clock drop, which replace our
+  `smd-rpm-clocks` workaround with upstream's design. **Trial-backported and
+  compile-tested on `6.18/topic/icc-rework`** (10/11 apply clean; the rpmpd DT
+  commit conflicts with our own equivalent and is skipped). Untested on hardware.
+  Sequence it **before D6**: upstream's own commit message says the QoS path is
+  unsorted, so programming QoS on top of the pre-rework interconnect builds on
+  sand.
+- **N2 the INT_MAX bandwidth hazard.** `aa60d907b3c2` sets `get_bw` to return 0
+  "to prevent initial setup from programming INT_MAX into the RPM (which otherwise
+  might hang the platform)". We have an adjacent symptom: our MDP SMMU node stays
+  `disabled` in the SoC dtsi because probing it before the display stack is up
+  "touches the MMSS bus un-arbitrated and resets the SoC". Test whether N1 removes
+  that constraint before inventing another explanation.
+
 ### Layer D — Display
 
 - **D1** panel drivers (done), **D2** TE (done), **D3** rails (done),

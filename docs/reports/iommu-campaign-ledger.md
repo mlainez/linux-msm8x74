@@ -310,3 +310,79 @@ dropped rather than merged around.
 **And a reference for D5:** `84df51667a19` adds `simple-framebuffer` to a mainline
 msm8226 board **in the board DT**, which is worth comparing against our
 lk2nd-injected `/chosen/framebuffer` when the simpledrm glitches are picked up.
+
+---
+
+## 2026-08-06 (7.x sweep) — upstream is reviving msm8974, and it lands on our display path
+
+**Correction first:** the previous entry called v6.19.14 "the upstream horizon".
+Wrong — stable carries `linux-7.0.y` and `linux-7.1.y`, and 42 `v7*` tags were
+already in this clone. The earlier check used a grep pattern that only matched
+`linux-6.*`. Horizon is **v7.1.6**.
+
+**7.x contains a deliberate effort to make msm8974 work on modern kernels**
+(March 2026): 15 commits, of which the interconnect series is the one that matters
+to us. Full table in `docs/analysis/UPSTREAM-SWEEP-msm8974.md` §6.
+
+### Why it matters
+
+Our display root cause #2 was "`qnoc-msm8974` fails to probe unless the msm8974
+**RPM bus clocks are re-added**" (`6.18/topic/smd-rpm-clocks`, now in
+`6.18/baseline`). **Upstream went the other way: fix the driver, delete the
+clocks** (`aa60d907b3c2` switches msm8974 to the main icc-rpm driver;
+`6453ad0865b6` drops the bus clocks from the DT as an abuse of internal NoC
+clocks). So our workaround is not merely non-upstreamable — it is the inverse of
+the accepted fix.
+
+Two statements in upstream's own commit message bear on open questions:
+
+1. `get_bw` returns 0 "to prevent initial setup from programming INT_MAX into the
+   RPM (**which otherwise might hang the platform**)". Compare our own DT comment:
+   the MDP SMMU node stays `disabled` in the SoC dtsi because probing it before
+   the display stack is up "touches the MMSS bus un-arbitrated and resets the
+   SoC". **Candidate shared mechanism** → ACU N2.
+2. It ignores `-ENXIO` from firmware "until the **QoS programming** is sorted
+   out" — independent upstream confirmation that MDP/bus QoS does not exist
+   upstream, i.e. **D6 is missing, not hidden**, and N1 should precede it.
+
+### N1 trial-backport — feasibility answered, not assumed
+
+Branch **`6.18/topic/icc-rework`** off `6.18/baseline`:
+
+- **10 of 11 commits cherry-pick clean** (`-x`): the 9 interconnect/binding
+  commits plus `6453ad0865b6` (DT bus-clock drop).
+- **1 conflicts and is skipped:** `df7c440c904f` (SoC-wide rpmpd migration)
+  collides with our own equivalent from `adsp-sensors`. Expected, not a problem.
+- **Compile-tested:** `drivers/interconnect/qcom/msm8974.o` builds, FP2 DTB
+  builds, and the DTB verifies the intended shape — five NoC nodes with **no**
+  clocks, `interconnect@fc478000` (MMSSNOC) keeping a single `"bus"` clock.
+- **UNTESTED ON HARDWARE.**
+
+**Nuance found while checking whether `smd-rpm-clocks` becomes redundant:** it
+does **not** become fully redundant. After the rework exactly one DT reference to
+an RPM bus clock survives — `RPM_SMD_OCMEMGX_CLK` on the `qcom,msm8974-ocmem`
+node — and **upstream v7.1.6 keeps the identical reference**. So drop the NoC
+bus-clock part only; do not delete the topic wholesale.
+
+### Pre-registered predictions for N1 (before any device runs it)
+
+1. `qnoc-msm8974` probes **without** the re-added NoC bus clocks, and the display
+   controller no longer waits forever on MMSSNOC.
+2. If the INT_MAX hazard was biting us, MMSS-related resets change — possibly
+   including the constraint that keeps our MDP SMMU node `disabled` until the
+   display stack is up.
+3. If neither changes, N1 is still correct (it aligns us with upstream and removes
+   a workaround) but explains nothing, and D6/D7 remain the display leads.
+
+### Also settled by this sweep
+
+- **D8 holds at v7.1.6:** still **zero** `iommu@` nodes for msm8974 in the newest
+  kernel that exists. No upstream SMMU support has ever shipped for this SoC.
+- **FP2's MDP5 support survives 7.x pruning:** `a6f081ec4ce6` removed MSM8974**v1**
+  and renamed v2 to plain `msm8x74_config`, matched at `.revision = 2` — which is
+  the FP2. `429ebd815bbc` (drop single-flush) and `e224e3a167bc` (drop MDP5 1.0
+  workarounds) are base-move checks, not fixes.
+- **TSENS ack/re-arm storm still unfixed at 7.1.6** (only an `lmh` IRQ-flag change
+  in the whole range). Third confirmation; that fix is ours.
+- **Rebase hazard:** `2026159372bb` (`iommu/qcom`: scoped OF child loop) touches
+  the child-loop region our port modifies.

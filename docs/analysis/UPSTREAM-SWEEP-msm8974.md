@@ -98,7 +98,93 @@ one msm8974 fix in it we already had; the one adopt-shaped fix is deliberately
 left to stable; and the two things the campaign wants from upstream — msm8974
 SMMU support and MDP5 QoS/VBIF — do not exist at any version.
 
-## 6. Sweep list for the next release
+## 6. v6.19 → v7.1.6 — the msm8974 revival series (DONE 2026-08-06)
+
+Stable carries `linux-7.0.y` and `linux-7.1.y`; 42 `v7*` tags were already in this
+clone. Newest local release **v7.1.6**. An earlier note in this file said the
+horizon was 6.19 — that was wrong, produced by a `grep` pattern that only matched
+`linux-6.*`. Corrected here.
+
+**7.x contains an explicit effort to make msm8974 work on modern kernels**
+(March 2026, Baryshkov / Dybcio), and the `--grep=msm8974` result is 15 commits.
+
+### 6.1 The interconnect re-architecture — the one that touches our display path
+
+| Commit | What |
+|---|---|
+| `aa60d907b3c2` | **interconnect: qcom: msm8974: switch to the main icc-rpm driver** — *"In preparation to restoring the ability of MSM8974 driver to work with the modern kernels"* |
+| `6453ad0865b6` | **ARM: dts: qcom: msm8974: Drop RPM bus clocks** — removes nodes "abusingly referencing internal bus clocks … as if they were the only devices on an NoC bus"; also collapses the MMSS node to a single `MMSS_S0_AXI_CLK` `"bus"` clock |
+| `f64f37521c34`, `199363ed2f6a` | bindings: drop bus clocks, use `qcom,rpm-common` |
+| `fba5454ef58b` | icc-rpm: allow overwriting the `get_bw` callback |
+| `91cfd1604f9e` | interconnect: let platforms declare their bugginess |
+| `1d5b5f7d755b` | define the **OCMEM** bus resource |
+| `0e841d1d5613`, `39ecfef48384`, `b8498af90168` | dedup/expand macros, drop unused `is_on` |
+| `df7c440c904f` | **ARM: dts: qcom: msm8974: Start using rpmpd for power domains** (SoC-wide version of what we did locally for the ADSP) |
+
+**Why this matters more than anything else in the sweep.** Our display root cause
+#2 was that `qnoc-msm8974` fails to probe with `-ENOENT` unless the msm8974 **RPM
+bus clocks are re-added** — that is `6.18/topic/smd-rpm-clocks`, now folded into
+`6.18/baseline`, and our 6.18 tree still carries the bus-clock abuse (3 hits for
+the `*_A_CLK` pattern). **Upstream went the other way: fix the driver, delete the
+clocks.** So our workaround is not merely non-upstreamable, it is the opposite of
+the accepted solution.
+
+Two statements in `aa60d907b3c2`'s own message bear directly on open campaign
+questions:
+
+1. It sets `get_bw` to return 0 *"to prevent initial setup from programming
+   INT_MAX into the RPM (**which otherwise might hang the platform**)"*. We have
+   an adjacent observation in our own DT: the MDP SMMU node is kept `disabled` in
+   the SoC dtsi because "probing it without the display stack up touches the MMSS
+   bus un-arbitrated and resets the SoC". **Candidate shared mechanism** — worth
+   testing before inventing another.
+2. It ignores `-ENXIO` from the firmware *"until the **QoS programming** is sorted
+   out"*. That is independent, upstream confirmation that **MDP/bus QoS
+   programming does not exist upstream** — exactly D6. D6 is missing, not hidden.
+
+### 6.2 MDP5 at 7.x — msm8974 still supported, but the configs moved
+
+| Commit | Effect on us |
+|---|---|
+| `a6f081ec4ce6` Remove MSM8974v1 | v1 config deleted, v2 renamed to plain `msm8x74_config`, matched at `.revision = 2`. **The FP2 is revision 2 — still supported at v7.1.6** |
+| `e224e3a167bc` drop MDP5 1.0 workarounds | v1-era only |
+| `429ebd815bbc` drop single-flush support | check at a base move; FP2 is single-DSI |
+| `23c39217d933` drop MSM8998/SDM630/SDM660 | unrelated, but shows the direction: MDP5 is being pruned to what is maintained |
+
+### 6.3 Still absent at v7.1.6 — the campaign's two upstream wishes
+
+- **Zero `iommu@` nodes for msm8974** in `qcom-msm8974.dtsi`. D8 holds at the
+  newest kernel in existence: no upstream SMMU support has *ever* shipped for this
+  SoC, so MDP-through-SMMU stays a first.
+- **No MDP5 VBIF/QoS programming**, confirmed by §6.1's own commit message.
+- **TSENS ack/re-arm storm still unfixed** (the only thermal change in the range is
+  `781b391557a7`, an `lmh` IRQ flag).
+
+### 6.4 Rebase hazards recorded
+
+- `2026159372bb iommu/qcom: Simplify with scoped for each OF child loop` — touches
+  the child-loop region our port modifies for context banks.
+- `fd714986e4e4` (6.19) `attach_dev` signature change, already noted in §5.
+
+### 6.5 Consequence: a new ACU
+
+**N1 — adopt the upstream msm8974 interconnect rework onto 6.18**, replacing
+`smd-rpm-clocks`. Pre-registered predictions, before any attempt:
+
+1. `qnoc-msm8974` probes **without** re-added RPM bus clocks, and the display
+   controller stops waiting on MMSSNOC.
+2. If the INT_MAX-bandwidth hazard was biting us, MMSS-related resets change
+   behaviour — including possibly the reason our MDP SMMU node must stay
+   `disabled` until the display stack is up.
+3. It is worth having **before** D6, because D6 programs QoS and upstream says the
+   QoS path is unsorted; doing D6 on top of the pre-rework interconnect code would
+   build on sand.
+
+Feasibility is a backport question (11 commits, driver + bindings + DT, resting on
+`icc-rpm` helper changes) and must be answered by trial cherry-pick onto
+`6.18/baseline`, not by assumption.
+
+## 7. Sweep list for the next release
 
 Same table shape, content-verified per §1:
 
