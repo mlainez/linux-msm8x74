@@ -42,6 +42,37 @@ Prize if this campaign lands: 6.18 becomes shippable (display + GPU + radios),
 the silent-reset class is closed by attribution rather than by disarming a
 safety mechanism, and the same instruments serve VENUS later.
 
+### 0.1 What "display working" means here (operator directive, 2026-08-06)
+
+**The target is the same stack 6.12 ships, with its memory translated instead of
+carved out.** 6.12 is not a framebuffer hack: it runs **drm/msm KMS**
+(`qcom,msm8974-mdp5` + a real panel driver), and its DT contains **no
+`mdp_iommu` at all** — GEM memory comes from the vram carveout
+(`msm.vram=192m msm.allow_vram_carveout=1`). So the only thing 6.18 changes is
+*where the pixels live*: the carveout is gone, therefore the MDP must reach its
+buffers through its SMMU.
+
+Consequences, stated so no rung drifts:
+
+- **`simpledrm` is an instrument, not a path.** It proved the panel, the DSI
+  link and lk2nd's scanout can put pixels on the glass on 6.18 — which is
+  exactly why it is valuable as a control (§2.3) — but it is not a KMS driver,
+  it cannot carry the panel/backlight/TE stack, and nothing can be integrated on
+  top of it. It never becomes the shipping configuration.
+- **Definition of done for the display half:** `/dev/dri/card0` from drm/msm with
+  the MDP5 pipeline, the FP2 panel driver bound, TE-driven command mode, correct
+  pixels, 0 SMMU faults and 0 XPU count growth — i.e. CP6, not CP4 or CP5.
+- **Sequencing (operator priority):** a *stable 6.18 baseline with working
+  display on a full phone (panel + battery)* comes first; the 6.12 DVFS work is
+  integrated onto it **afterwards**, as its own rung (CP7a), not in parallel.
+  The DVFS stack is already validated on 6.12, so it must arrive as a
+  single-variable addition to an already-stable display baseline — never
+  co-debugged with it.
+- **Which device:** this half runs on the DUT (real FP2, battery, panel). The rig
+  has no panel and its DTB disables `&mdss`, so it can only serve the XPU/radio
+  track — those two tracks run on two devices and are therefore allowed to
+  proceed in parallel without violating one-variable-at-a-time.
+
 ---
 
 ## 1. Assets
@@ -104,13 +135,16 @@ Second, independent failure: with display enabled, **WCNSS bring-up at t≈8.3 s
 triggers a silent reset / boot loop**; a WCNSS-firmware-removed variant boots
 stable (still black).
 
-### 2.3 Display: `simpledrm` does put pixels on the panel
+### 2.3 Display: `simpledrm` does put pixels on the panel — as a *control*
 
 `DRM_SIMPLEDRM=y` + **headless** DTB + lk2nd handing over its live framebuffer
 (`lk2nd.pass-simplefb=autorefresh,relocate,xrgb8888`, plus
 `clk_ignore_unused regulator_ignore_unused`) → pixels appeared, with glitches
 and a boot loop. No drm/msm and no IOMMU involved. **This is the single most
-important asymmetry in the campaign** and §8 CP4 is built on it.
+important asymmetry in the campaign** and §8 CP4 is built on it — as a
+diagnostic that bisects "can this hardware display at all on 6.18?" away from
+"does drm/msm's MDP5 path deliver data?". Per §0.1 it is not a candidate
+shipping configuration.
 
 ### 2.4 Dead ends — do not repeat
 
@@ -189,6 +223,55 @@ pressure, invisible without the TZ log, and fatal only when err-fatal is armed.
 That matches the rig signature (idle deaths minutes apart, kernel doing
 nothing) better than anything else on the table. **Hypothesis H2 in §8.**
 
+It is not the only reservation we lack. `msm8974-mdss.dtsi` gives the primary
+framebuffer its own carveout — `mdss_fb0`:
+`qcom,memblock-reserve = <0x03200000 0x01E00000>` (30 MB at
+`0x03200000..0x05000000`) — plus EBI reservations for the audio heap
+(`0x614000`), `qsecom_mem` and `adsp_mem`. Mainline reserves none of these at
+those addresses. Two consequences: **M2 is a bigger audit than the PIL hole
+alone**, and lk2nd's hand-over framebuffer (the §2.3 control) lives in this same
+low region, which is a candidate explanation for the simpledrm *glitches*
+independent of stride/format.
+
+### 2.8 Display: two vendor register blocks mainline does not program (new, 2026-08-06, authority 1)
+
+Same class of defect as root cause §2.1.7 (the BFB block), found by reading
+`msm8974-mdss.dtsi` rather than the mainline side:
+
+```
+qcom,vbif-settings = <0x0004 0x00000001>, <0x00D8 0x00000707>,
+                     <0x00F0 0x00000030>, <0x0124 0x00000001>,
+                     <0x0178 0x00000FFF>, <0x017C 0x0FFF0FFF>,
+                     <0x0160 0x22222222>, <0x0164 0x00002222>;
+qcom,mdp-settings  = <0x02E0 0x000000E9>, <0x02E4 0x00000055>,
+                     <0x03AC 0xC0000CCC>, <0x03B4 0xC0000CCC>,
+                     <0x03BC 0x00CCCCCC>, <0x04A8 0x0CCCC0C0>,
+                     <0x04B0 0xCCCCC0C0>, <0x04B8 0xCCCCC000>;
+```
+
+These are the MDP's **VBIF (bus interface) limits and AXI priorities** and a set
+of MDP QoS/clock-gate-control registers, written by the downstream mdss driver on
+every 8974. Two of the VBIF entries (`0x0160`, `0x0164`) are the out-AXI
+priority/ordering words and `0x00D8` is a read-limit configuration — exactly the
+arbitration knobs that decide whether the display's real-time fetch wins against
+another master on BIMC.
+
+Why this matters for *both* open display failures:
+
+- **Black with zero faults** (§2.2) is consistent with data never arriving at the
+  DSI, which is what starved or wrongly-limited AXI reads look like — no fault
+  is raised because nothing illegal was attempted.
+- **The WCNSS-bring-up reset** (§2.2) is the display sharing BIMC with a burst of
+  firmware-load traffic, i.e. precisely the case these priorities exist for. This
+  is the concrete form of hypothesis H4.
+
+Also from the vendor's v2 IOMMU overrides (`msm8974-v2-iommu.dtsi:136`), which
+confirm our port and add two requirements to audit:
+`&mdp_iommu { vdd-supply = <&gdsc_mdss>; qcom,iommu-enable-halt; ... }` with the
+same **18-register BFB block** we already carry. So the MDP SMMU's registers are
+only reachable with the **MDSS GDSC powered**, and the vendor **halts the SMMU**
+around reprogramming. Both are ACUs below (D9), not assumptions.
+
 ---
 
 ## 3. Target specification — the numbers "done" means
@@ -263,12 +346,24 @@ Oracle numbers to capture (authority 2, CP0):
 
 - **D1** panel drivers (done), **D2** TE (done), **D3** rails (done),
   **D4** RPM bus clocks + MMSSNOC reparent (done).
-- **D5** simpledrm stride/format agreement with lk2nd (open; explains glitches).
-- **D6** MDP QoS/priority/danger-LUT programming the vendor does and mainline
-  does not (open; prime suspect for both black-screen and the WCNSS collision).
+- **D5** simpledrm stride/format agreement with lk2nd (open; explains glitches —
+  but see §2.7: its buffer sits in the low region we do not reserve).
+- **D6** **`qcom,vbif-settings` + `qcom,mdp-settings`** (§2.8): 8 + 8
+  implementation-defined registers the vendor writes and mainline does not.
+  Prime suspect for both the black screen and the WCNSS collision. Port as DT
+  properties written after the MDSS GDSC is on, mirroring how the BFB block was
+  done (open).
 - **D7** scanout path proof: which stage stops the pixels — DSI FIFO, MDP
   fetch, or the panel's own RAM write (open; the black-not-garbage signature
   says "no data arrived", so instrument the DSI byte counters).
+- **D8** compare against the **6.16 fork**, which has both the carveout *and* the
+  SMMU support: the closest working reference for MDP-through-SMMU state
+  (authority 3, open).
+- **D9** MDP SMMU power/halt requirements (§2.8): `vdd-supply = <&gdsc_mdss>`
+  and `qcom,iommu-enable-halt`. Verify our instance is only touched with the
+  MDSS GDSC enabled, and that reprogramming halts the SMMU as the vendor does
+  (open — a lost register write here looks exactly like "attached, no faults,
+  no pixels").
 
 ### Layer X — XPU
 
@@ -360,7 +455,34 @@ Hypotheses under test, stated now so results cannot be rationalised later:
   power transient. *Predicts:* V3 (display, no radios) is stable, and the TZ
   XPU counts stay flat across a display run.
 
+### Track structure and order (operator priority, §0.1)
+
+The checkpoints keep their numbers for traceability, but they run as **two tracks
+on two devices**, and the display track is the critical path:
+
+| | Track A — display (DUT: panel + battery) | Track B — XPU (rig: no panel, radios up) |
+|---|---|---|
+| order | **CP0a → CP3 → CP4 → CP6 → CP7a → CP7 → CP8** | CP0b → CP1 → CP2 |
+| goal | a stable 6.18 baseline whose **drm/msm** device drives the panel | name the violating XPU and close it by attribution |
+| gate into CP7 | pixels correct, 0 faults | XPU counts flat with err-fatal **armed** |
+
+Both tracks share CP0's instruments, and Track B's verdict is a **prerequisite of
+CP7, not of CP6**: the display baseline may be declared working while the XPU
+question is still open, but nothing is promoted until it is closed.
+
+**CP7a — integrate the 6.12 DVFS stack** onto the *already stable* display
+baseline: krait clocks, SPM gang rail (including `c1076b55dd05`), the OPP table,
+thermal trips and the cooling maps, as one merge of validated topics and nothing
+else. Prediction to record before it runs: display and DVFS are independent, so a
+regression here means a shared resource (MMSS/CX rail votes, BIMC arbitration, or
+the CX corner) and the interaction matrix §7 row "display × DVFS" is where it
+will show. Never co-debug this with an unstable display.
+
 ### CP0 — Instruments ready *(gate: no feature work before this passes)*
+
+Split by track: **CP0a** = O2/O3/O5 + the oracle's MDP/SMMU/QoS captures (Track
+A needs no TZ log to start); **CP0b** = O1 + X3 calibration (Track B cannot start
+without them).
 
 O1 built and **calibrated by X3** (a violation we caused shows up in the log);
 oracle baseline (§5) captured; V4/V5 buildable. Verdict requires: O1 output on
@@ -425,19 +547,31 @@ is 6.18 a candidate to replace 6.12 as production.
 
 ## 9. Run these first — cheap and decisive
 
-1. **Oracle TZ log capture** (§5.1–5.2). Five minutes, zero risk, and it decides
-   whether nonzero XPU counts are normal on this hardware. *Nothing about the
-   XPU thread can be concluded without this baseline.*
-2. **O1 on 6.12, not 6.18.** 6.12 is the stable series and it *has* the armed
-   err-fatal and a reproducible reset case; building the instrument there
-   removes the display variable entirely.
-3. **X3 calibration** (deliberate gpio62 violation on a throwaway branch) — the
-   only way to know O1 works.
-4. **Finish the static memory-map audit** (M2). It is pure reading, it costs
-   nothing on-device, and H2 stands or falls on it.
-5. **Read the 6.16 fork's MDSS/IOMMU DT and drivers** (authority 3): 6.16 still
-   has the carveout *and* the SMMU support, so it is the closest working
-   reference for MDP SMMU state.
+Ordered for the operator priority in §0.1 (display first). Items 1–3 need no
+device at all and are the next actions regardless of hardware availability.
+
+1. **Port `qcom,vbif-settings` + `qcom,mdp-settings`** (D6, §2.8) — static work,
+   the same shape as the BFB port that is already proven, and the leading
+   candidate for both the black screen and the WCNSS collision. Write it, do not
+   test it yet; it goes into the CP4 variant matrix as one variable.
+2. **Finish the static memory-map audit** (M2, §2.7): the PIL hole at
+   `0x05d00000`, the framebuffer carveout at `0x03200000`, audio/qsecom/adsp EBI
+   reservations. Pure reading; H2 and the simpledrm glitches both depend on it.
+3. **Read the 6.16 fork's MDSS/IOMMU DT and drivers** (D8, authority 3): 6.16 has
+   the carveout *and* the SMMU support, so it is the closest working reference
+   for MDP-through-SMMU state; diff its MDP SMMU wiring against ours.
+4. **Audit D9** (MDSS GDSC + `qcom,iommu-enable-halt`) against our `mdp_iommu`
+   node and the qcom-iommu probe path — static, and a lost register write here
+   presents exactly as "attached, no faults, no pixels".
+5. **Oracle captures** (§5) as soon as the phone is available: MDP/SMMU/QoS
+   registers for Track A, and `tzdbg/{interrupts,reset_info,log}` for Track B.
+   Five minutes, zero risk, and the TZ capture decides whether nonzero XPU counts
+   are normal on this hardware at all.
+6. **O1 on 6.12, not 6.18** (Track B): 6.12 is the stable series and it *has* the
+   armed err-fatal and a reproducible reset case, so building the instrument
+   there removes the display variable entirely. Then **X3 calibration**
+   (deliberate gpio62 violation on a throwaway branch) — the only way to know O1
+   works.
 
 ---
 
