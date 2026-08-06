@@ -62,13 +62,45 @@ gang-rail) beyond what we already carry. Every one of those remains ours, which
 is consistent with 6.12 being a strict superset of 6.18's clk work (IOMMU ledger,
 2026-08-06 entry).
 
-## 5. v6.19 and later — OPEN
+## 5. v6.18 → v6.19.14 — DONE (2026-08-06)
 
-`stable/linux-6.19.y` exists upstream and was **not** in this clone; a fetch was
-started 2026-08-06 and had not completed when this was written. Nothing about
-6.19+ is asserted here.
+`stable/linux-6.19.y` fetched; newest release **v6.19.14** (2026-04-22), which is
+the newest stable branch the kernel.org stable repo carries, so this is the
+current upstream horizon.
 
-**Sweep list for when it lands** (same table shape, content-verified per §1):
+**The whole-tree `--grep=msm8974` result is two commits**, both the same change:
+
+| Commit | Subject | Ours? |
+|---|---|---|
+| `a1f2c2d55a81` | `remoteproc: qcom_q6v5_pas: Use resource with CX PD for MSM8974` — points `qcom,msm8974-adsp-pil` at `msm8996_adsp_resource`, "which has cx under proxy_pd_names" | **already have it, by content**, on *both* series |
+| `3d447dcdae53` | `dt-bindings: remoteproc: qcom,adsp: Make msm8974 use CX as power domain` | matching DT already ours: `power-domains = <&rpmpd MSM8974_VDDCX>`, `power-domain-names = "cx"` |
+
+Our `adsp-sensors` work reached the same conclusion, by the same reasoning,
+before upstream landed it — independent corroboration of a fix we shipped.
+**Rebase note:** when a base move brings `a1f2c2d55a81` in, our local change to
+that table becomes redundant and should be dropped in favour of upstream's rather
+than merged around.
+
+**Per-path, everything else:**
+
+| Path | 6.19 work | Verdict |
+|---|---|---|
+| `drivers/iommu/arm/arm-smmu/qcom_iommu.c` | `6a3908ce56e6` fix device leak on `of_xlate()` (moves `put_device()` so the **success** path releases the reference too — our base leaks one device refcount per attached master); `fd714986e4e4` iommu core: **pass the old domain to `attach_dev` callbacks** | **`6a3908ce56e6`: WATCH, do not cherry-pick.** It only prevents driver unbind, which we never do, and it is exactly the kind of fix stable 6.18.y picks up — self-adopting it would collide with the automated stable merge on an integration branch. **`fd714986e4e4`: base-move hazard** — it changes the `attach_dev` signature our `qcom_iommu_attach_dev` implements, so a future move off 6.18 touches our port |
+| `drivers/gpu/drm/msm/` (102 commits; MDP5/KMS subset) | `7be36c7b60c8` mdp5 → `drm_atomic_get_new_crtc_state()`, `95eacb81d0d9` `drm_crtc_vblank_waitqueue()`, `89194773f573` NULL check in `vm_op_enqueue()`, kernel-doc fixes | **nothing for us.** No returning no-IOMMU path, no msm8974 SMMU support, **no MDP5 VBIF/QoS support** — so the D8 verdict (no working reference for MDP-through-SMMU anywhere) holds at 6.19 as well, and D6 remains ours to write |
+| `arch/arm/boot/dts/qcom` (ARM 32-bit, 6 commits) | msm8960 and msm8226 only — **no msm8974**. One is worth knowing: `84df51667a19 ARM: dts: qcom: msm8226-samsung-ms013g: add simple-framebuffer` | reference for the simpledrm control: a mainline board declaring `simple-framebuffer` **in the board DT**, versus our lk2nd-injected `/chosen/framebuffer`. Compare the two when D5 (stride/format) is picked up |
+| `drivers/thermal/qcom` | **0 commits** | the TSENS ack/re-arm storm is unfixed at 6.19 too. Ours to write, confirmed twice now |
+| `drivers/soc/qcom/spm.c` | **0 commits** | our gang-rail work stands alone upstream |
+| `drivers/pmdomain/qcom/rpmpd.c` | 1 commit | check at base-move time; nothing msm8974-specific |
+| `drivers/cpufreq/qcom-cpufreq-nvmem.c` | 3 commits, all **ipq806x** (match-list sentinel, warning, SMEM fallback) | irrelevant to Krait/msm8974 |
+
+**Net:** 6.19 contains **no fix we need and none that unblocks the display**. The
+one msm8974 fix in it we already had; the one adopt-shaped fix is deliberately
+left to stable; and the two things the campaign wants from upstream — msm8974
+SMMU support and MDP5 QoS/VBIF — do not exist at any version.
+
+## 6. Sweep list for the next release
+
+Same table shape, content-verified per §1:
 
 1. `drivers/gpu/drm/msm/` — above all, whether **any** msm8974/MDP5 work landed:
    a return of a no-IOMMU path, MDP5 QoS/VBIF support, or `mdp5_kms` changes.
