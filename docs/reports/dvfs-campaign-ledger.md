@@ -2651,3 +2651,72 @@ this and does not depend on the soak:
 published artifacts, arm a *persistent* soak unit, and run EXP-P1 again in the
 registered order — idle control first, then load — with the modem stack masked
 from the first boot rather than from inside the run.
+
+### The reversal test was NOT completed — what the err-fatal conviction does and does not rest on
+
+I claimed mid-session that the phone going unreachable under the re-armed stock
+configuration was "the reversal reproducing". That was wrong, and the watch data
+says so plainly:
+
+```
+*** RESET DETECTED: boot changed 73b59e0b -> e9e7133f     <- my own reboot
+  t=14m uptime=70.73s   boot=e9e7133f armed modem=running
+  ...
+  t=20m uptime=403.73s  boot=e9e7133f armed modem=running
+  t=21m UNREACHABLE                                       <- Marc took it to fastboot
+```
+
+The armed stock boot ran **403 s (6.7 min) clean** and then left the network
+because the device was put into fastboot, not because it reset. Since the armed
+baseline itself contained a 584 s crash-free interval, 6.7 minutes discriminates
+nothing.
+
+**So the case against armed err-fatal rests entirely on one asymmetry:** four
+crashes in ~15 min while armed (7/96/142/584 s, PS_HOLD, pstore empty, no kernel
+message, at idle and under load alike) versus 21 min unbroken while disarmed, the
+latter also absorbing seven modem fatal-error/recovery cycles. That is suggestive
+and it is what the disarm decision was taken on, but it is **not** a controlled
+result: the armed and disarmed runs differ in more than the property (the
+self-inflicted rmtfs/ModemManager masks existed during part of the disarmed run),
+and boot #2's 7 s crash still has no explanation.
+
+Recording this because the dtsi commits cite the asymmetry as their justification.
+The asymmetry is real and reproducible from the logs; the *causal* claim is not yet
+closed, and a proper A/B on a device that is otherwise untouched is still owed.
+
+### Disarm landed, and the device trees carry no trace of it
+
+`qcom,xpu-err-fatal` and its consumer were **both ours** — authored 2026-07-26
+(`729ef9a8c17a`) and 2026-07-31 (`c90b48c4d227`), with zero occurrences in `v6.12`,
+`v6.18` or `v6.12.101` for either the dtsi or `qcom_scm.c`, and no DT binding. The
+vendor arms err-fatal in code (`scm-xpu.c`), never through a device-tree property,
+so the property name exists only in this fork. Removing it is therefore a revert of
+our own eleven-day-old change, and every untested board built from the shared dtsi
+(Sony shinano, Samsung klte, Nexus 5, DragonBoard) returns to the behaviour it had
+before 26 July.
+
+Landed on `6.12/{topic/xpu-disarm,staging,rc,int/d3}` and
+`6.18/{topic/xpu-disarm,staging,rc}`. Per Marc's instruction the device trees keep
+**no** comment about it — the `scm` node is byte-identical to upstream's and the
+rig's `/delete-property/` is gone — so this ledger is the only record.
+
+### Release chain: three missing cross-repo tokens, all found by failing loudly
+
+| secret | belongs on | dispatches to | symptom when unset |
+|---|---|---|---|
+| `KERNEL_DISPATCH_TOKEN` | `mlainez/linux-msm8x74` | `citronics-kernel` | a push to `6.12/rc`/`6.18/rc` builds nothing; `notify-kernel-build` fails in ~6 s |
+| `APT_DISPATCH_TOKEN` | `citronics-kernel`, `initramfs` | `deb-packages` | debs reach GitHub Releases, apt index never regenerates |
+| `IMAGES_DISPATCH_TOKEN` | `deb-packages` | `debos-citronics` | apt correct, prebuilt images stale (warning only) |
+
+Until they exist a release needs three manual dispatches. `notify-kernel-build`
+already failed loudly by design; the other two now do too.
+
+### Clean-reflash baseline (2026-08-07, for the idle observation Marc asked for)
+
+Fresh `sparse-ubuntu-lime-fp2.img` to userdata (240 s), nothing else flashed.
+Verified pristine before installing anything: Ubuntu 26.04, image kernel
+6.16.12, **0** masked units, **0** of our units, empty `/usr/local/bin`,
+`rmtfs` enabled *and active out of the box* — which independently proves today's
+rmtfs mask was self-inflicted and never shipped — battery `present=1
+status=Charging`, and `Components: main` only. USB networking came up on
+10.0.42.1 sixty seconds after `fastboot reboot`.
