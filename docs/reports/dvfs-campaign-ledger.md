@@ -2541,3 +2541,54 @@ behaviour — mainline never arms it and tolerates the violation silently — an
 imposing our experiment on boards we cannot test. That would also make the rig's
 `/delete-property/` redundant. The alternative, keeping it armed and deleting it
 per-board, leaves every untested board armed.
+
+### Correction: two of my own inferences were wrong, and one fault was self-inflicted
+
+Recorded in full because both errors were the same kind — reading a pattern into
+too little data, then acting on it.
+
+**1. There is no reset cadence.** I described "~90–120 s" and inferred a watchdog
+from the regularity. Separating real crashes from my own reboots via `warm_reset`
+(`0x0002` = crash, `0x0000` = an orderly `systemctl reboot`) gives intervals of
+**7 s, 96 s, 142 s, 584 s** — sporadic, with a 9.7-minute crash-free interval in
+the middle. No cadence existed, so the watchdog inference had no support.
+
+**2. The modem is not necessary.** Boot #2 crashed after **7 s** with
+`fc880000.remoteproc` never powered up, so the MSS cannot be the sole cause.
+
+**3. The modem crash loop I diagnosed was mine.** From 07:09 the modem cycled
+`dog.c:1496 Watchdog detects stalled initialization` → crash → reload every ~41 s,
+seven times. Cause: `rmtfs.service` was **masked**, so nothing served the modem's
+EFS over the RMTFS protocol and its init stalled. Starting rmtfs stopped the loop
+immediately (crashes were metronomic at 559/600/641/682/723/764/806 s; rmtfs came
+up at ~849 s and no eighth crash followed).
+
+But the mask was **not** in the image. The rig, running the *same* image, has rmtfs
+`enabled`/`active` and zero stall crashes across 10 h 37 m. On the phone,
+`/etc/systemd/system/rmtfs.service -> /dev/null` and
+`ModemManager.service -> /dev/null` were both created at **07:08 today**, and the
+sudo log shows two scripts I never authored in any completed call —
+`/tmp/forensics.sh` (07:05:27) and `/tmp/load.sh` (06:58:57) — executed as root
+from tool calls that were interrupted before I could see them. This is the
+`device-harness-traps` rule again: **an interrupted call still runs.**
+
+Timing is what makes this a correction rather than a finding: **the masks date from
+07:08, the resets began at 06:55.** Through boots #2–#5 rmtfs was running normally
+and the modem could initialize, and the SoC still reset four times. So the stalled
+init explains nothing about the original resets — I diagnosed a fault I had created.
+
+What does survive is worth more than what was lost: with err-fatal **disarmed**, the
+phone absorbed **seven consecutive modem fatal-error/recovery cycles with no SoC
+reset**. A remoteproc fatal error is exactly the kind of event armed err-fatal would
+escalate, which sharpens rather than weakens the err-fatal hypothesis.
+
+Both masks have been removed; `ModemManager` and `rmtfs` are enabled and active
+again, so the only deliberate delta from the shipped configuration is the disarmed
+`qcom,xpu-err-fatal`.
+
+**Status of EXP-P1: 1073 s (17.9 min) on a single boot**, radios up, modem running,
+against a baseline of four crashes in ~15 min whose longest interval was 584 s.
+Promising but **not yet a result**: a single clean window does not establish the
+effect. The reversal is mandatory — re-arm err-fatal and show the resets come back —
+before disarming can be credited, and the 7 s crash of boot #2 still has no
+explanation and must not be quietly dropped.
