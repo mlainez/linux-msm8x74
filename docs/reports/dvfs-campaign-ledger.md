@@ -2720,3 +2720,88 @@ Verified pristine before installing anything: Ubuntu 26.04, image kernel
 rmtfs mask was self-inflicted and never shipped — battery `present=1
 status=Charging`, and `Components: main` only. USB networking came up on
 10.0.42.1 sixty seconds after `fastboot reboot`.
+
+## 2026-08-07: the IRQ storm, and a survey of the upstream msm8974 revival
+
+Marc asked whether the interrupt storm should be fixed in 6.12, recalling that a
+7.x msm8974 revival might carry something to backport. Both halves were checked.
+
+### The storm does not currently reproduce, and two of my readings were wrong
+
+**Wrong reading 1 — "37 million interrupts".** I summed `/proc/interrupts` columns
+2..NF-2, which on `pmic_arb` lines includes the **hardware IRQ number**, not a
+count. `temp-alarm` "37748784", `spmi-iadc` "56623157" and `pm8941_pwrkey`
+"8388645" are hwirq encodings. Their real CPU counts are 0, 3 and 0. There is no
+PMIC storm. Sum only the per-CPU columns (`$2+$3+$4+$5` on a 4-core target).
+
+**Wrong reading 2 — hysteresis.** I supposed the trips had none. They are healthy:
+70 °C/5 °C and 88 °C/4 °C passive, 105 °C/3 °C critical.
+
+**Measured now, on both fixtures:**
+
+| fixture | state | tsens IRQ (line 55) | rate |
+|---|---|---|---|
+| phone, 3.2~rc3.18 | idle, 47 °C | 4755 | **0/s over 20 s** |
+| rig, 12 h BOINC | loaded, 79–86 °C | 7 257 541 | **0/s over 20 s** |
+
+So the 7.25 M interrupts on the rig accumulated in an earlier phase and stopped;
+the irq thread shows 1.7 % *lifetime* CPU, not the 25 % instantaneous figure
+recorded earlier. The storm correlates with sitting **exactly at the 88 °C passive
+trip** — the rig is now at 79–86 °C, below it. That fits repeated re-crossing of
+the upper threshold: hysteresis damps only the downward transition, so a
+temperature pinned at a trip re-arms and re-fires on every jitter above it.
+
+**A real defect found on the way, not yet linked to the storm.** The tsens uplow
+handler skips any sensor with no thermal zone:
+
+```c
+if (!s->tzd)
+        continue;          /* violation never cleared */
+```
+
+The interrupt is **level-triggered** and only deasserts when something reprograms
+that sensor's thresholds, so an unzoned sensor whose threshold is violated holds
+the line asserted forever. msm8974 tsens has **11 sensors (0–10)** and our device
+tree zones only **1–10**: sensor 0 — the one the driver comments call the "master
+sensor" — has no zone. That is a genuine gap and it would produce exactly this
+temperature-dependent signature. It is **not proven** to be the cause.
+
+**Do not patch it yet.** Nothing is measurable while the storm will not reproduce,
+and the campaign rule is one variable against a measured defect. The reproduction
+to run first: pin a device at the 88 °C trip under load and sample line 55's rate
+per second; if it storms, mask sensor 0's interrupt (or give it a zone) and repeat.
+Upstream cannot help here — the only storm/spurious fixes in `drivers/thermal/`
+since v6.12 are all MediaTek LVTS.
+
+### The sdhci thread is separate, and its timeout was a symptom
+
+Recorded again because the two get conflated: the `pwr_irq`/card-detect storm is
+not this. It stands closed as a **retraction** — gpio62 is not the FP2's
+card-detect line (vendor `board-8974-gpiomux.c:754` annotates it out), muxing it
+caused SoC resets, and it was a functional regression besides, since
+`mmc_rescan()` powers off whenever `get_cd()` returns 0. No upstream 6.16 fix
+exists (`&sdhc_2` is byte-identical at v6.12/v6.16/v6.18; `db58532188eb` is 6.17
+and already in our baseline via v6.12.43). Live on the phone: no sdhci timeouts,
+mmc0/mmc1 at 16.8k/13.1k total. Quiet and unexplained, not fixed.
+
+### The upstream msm8974 revival is real — and delivers nothing to 6.12 today
+
+Marc's recollection was correct: **49 commits** mention msm8974 between v6.12 and
+v7.2-rc6, including a full interconnect rewrite onto `icc-rpm`, rpmpd power
+domains, dropped RPM bus clocks, a CX power domain for remoteproc, MBN firmware
+loading and MDP5 v1.0 removals. Each relevant one was tested against `6.12/rc`:
+
+| commit | applies | verdict |
+|---|---|---|
+| `581e3dea0ece` q6v5_mss: load MBN on msm8974 | clean | **no-op for us**: `linux-firmware-lime-fp2` ships the split `mba.b00`/`mba.mdt`/`modem.bNN` set; the only `.mbn` present is `venus.mbn`, and Venus is dropped (no TZ) |
+| `a1f2c2d55a81` q6v5_pas: CX PD for msm8974 | clean | **plausible but unmotivated**: switches adsp to `msm8996_adsp_resource`, whose only material difference is `.proxy_pd_names` (CX as a boot *proxy* rather than held for the device's lifetime). Our DT already declares `power-domains = <&rpmpd MSM8974_VDDCX>`, and the ADSP is `running` with 0 errors. A power refinement with no defect behind it — not on a release gate |
+| `3d447dcdae53` binding for the above | clean | pairs with it |
+| `df7c440c904f` msm8974: use rpmpd | conflicts | **we are ahead**: our dtsi has 34 rpmpd/power-domain references (incl. `MSM8974_VDDCX_AO` on four nodes) against upstream v7.2's 14. Our fork already did this |
+| `a6f081ec4ce6`, `e224e3a167bc` MDP5 v1.0 removals | clean | **irrelevant**: FP2 is 8974 **Pro**; these delete v1.0-only paths, and they touch a display that works on 6.12 |
+| interconnect rewrite onto `icc-rpm` | not attempted | large, no observed problem it solves for us; revisit only if an interconnect defect is measured |
+
+**Conclusion: nothing to backport for 6.12 right now**, and the reasons are
+per-commit rather than a blanket refusal. The storm's most promising lead is ours
+(sensor 0), and it needs a reproduction before a patch. The MDP5 and interconnect
+work should be re-examined from the **6.18** side, where the display is unsolved
+and where those commits actually bear on live questions.
