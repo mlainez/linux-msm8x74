@@ -180,17 +180,3 @@
 	qcom,minimum-input-voltage = <4300000>;
 };
 
-/*
- * XPU-violation err-fatal needs no override here any more: qcom-msm8974.dtsi no
- * longer arms it for any board, so the /delete-property/ this file used to carry
- * has been dropped rather than left as dead code implying the property exists.
- *
- * The measurement that first justified disarming was taken on this fixture
- * (2026-08-04): armed, it took two PS_HOLD deaths in ~16 min of idle, with
- * ramoops trails showing all four cores parked at 300 MHz, the gang rail static
- * (vdd_writes frozen, vdd_timeouts 0, volt_sel == volt_sel_req), 65 C and 4.9 V
- * - the kernel doing nothing and TZ resetting the SoC anyway.  Disarmed, it ran
- * 43 min idle and 40 min of four-core load at 86-88 C without a reset.  A phone
- * with a battery reproduced the same thing on 2026-08-07, which is what moved the
- * decision from this fixture to the SoC dtsi; the reasoning now lives there.
- */
