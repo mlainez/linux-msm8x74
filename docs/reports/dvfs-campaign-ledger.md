@@ -2139,3 +2139,55 @@ uptimes *lexically* — `"111" < "80"` is true. Boot boundaries are explicit
 `# start boot_id=…` lines in the telemetry file; parse those instead of inferring
 them from uptime deltas. The corrected parser is
 `scratchpad/an.py`-style: split on `# start`, then treat each block independently.
+
+## CP-PHONE (pre-registered 2026-08-07 08:10 CEST, before the device booted)
+
+The last §1.1 gate: DVFS + thermal + charger on a real FP2 **with a battery**,
+run on the **shipping artifacts** (apt kernel + apt initramfs), not on a local
+build. Marc connected the DUT (`e4f4c070`, verified `product: FP2`, lk2nd
+present; the Android oracle `81314fe6` is not attached).
+
+Method: flash the pristine debos Ubuntu image to `userdata` only (`boot` keeps
+lk2nd), enable the `experimental` component, then `apt install` the initramfs
+**before** the kernel so the DTB detection exists when the kernel's postinst
+runs. Crucially, `deviceinfo_dtb` is left unset — the point is that detection
+chooses, unaided.
+
+**Predictions, registered now so the run can falsify them:**
+
+1. **DTB detection → phone.** A real pack makes `citronics_battery_state`
+   report `present`, so `citronics_detect_dtb` must return
+   `qcom-msm8974pro-fairphone-fp2.dtb` and rewrite `extlinux.conf`'s `fdt` line
+   to it. This is the branch that *cannot* be exercised on the carrier rig, which
+   is why it only had unit-test coverage until now.
+2. **DVFS present and wider than the rig's.** Four schedutil policies, and a
+   ceiling above the rig's throttled 1267.2 MHz — a phone has a chassis and the
+   thermal mass of a pack, so it should hold higher OPPs. If the ceiling is the
+   same, the rig's thermal-bound caveat was wrong.
+3. **Charger engages.** `present=1` on the pack, `status=Charging` with the cable
+   attached, and the engagement supervisor should not have to re-arm repeatedly
+   (repeated re-arms would mean the tier-2 fix works only on the rig's phantom
+   battery).
+4. **No silent reset under sustained load.** Failure signatures are already
+   characterised: `poff=0x0002` = the kernel DVFS signature, `poff=0x2000` =
+   UVLO / battery-pull.
+5. **The 4.45 V `qcom,minimum-input-voltage` floor is harmless here.** Lowering
+   it to 4.30 V was a *rig-only* fix for a board whose only supply is the input;
+   with a pack to carry load onset, the vendor floor should cause no collapse.
+   A collapse at load onset here would mean that fix is needed on phones too.
+
+**The three-configuration detection matrix Marc asked for** (he switches the rig
+to host mode next, so all three get exercised today):
+
+| Configuration | Battery as the kernel sees it | DTB that must be chosen |
+|---|---|---|
+| Phone + real pack | `present` | phone |
+| Rig, debug mode (USB_IN powers the board) | `absent` — measured: `smbb-bif type=Battery status=Discharging present=0` | rig |
+| Rig, **host mode** (PD feeds the battery pins) | **predicted `absent`** | rig |
+
+The third row is the one worth registering a prediction for, because it is the
+case that could fool the logic: host mode does feed the battery pins, but
+presence is decided by BPD (thermistor / battery-ID), and the carrier has
+neither. If host mode instead reports `present`, detection would pick the phone
+DTB on a board with no panel and no pack — a real defect, and the reason to test
+it rather than assume.
