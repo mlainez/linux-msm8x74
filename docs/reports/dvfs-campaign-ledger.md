@@ -2289,3 +2289,91 @@ and XPU err-fatal armed. That is precisely the boot that killed the rig before
 sufficient discriminator, and detection must gain a second signal (the obvious
 candidate: absence of the FP2 panel/`gpio-keys` in `/proc/device-tree`, or a
 carrier marker) before it can be trusted to pick a DTB unattended.
+
+## Release plumbing (2026-08-07): four gaps, and why a good deb never reached apt
+
+Marc asked for a real release of the initramfs and the fixed kernel rather than
+hand-copied files. Attempting that exposed why the DVFS-less `3.2~rc3.16` was
+still the newest published kernel a day after the config fix was pushed.
+
+**1. Nothing invoked the kernel build when a config changed.** `changed-kernels.sh`
+hashes `configs/<name>.config` specifically so that a config edit rebuilds even
+when the kernel source has not moved — its own comment says a silently ignored
+config change "is a worse failure than rebuilding too often". But the workflow
+only ran on `repository_dispatch: kernel-rc-updated` (sent when the fork's rc
+branch moves) or a manual dispatch. A config-only push matched nothing, so that
+detection never got to run. Confirmed by measurement, not inference: recorded
+config hash `681552b858…` vs current `c2dd76dcc2af554a`, same source sha
+`2bb74a3`. Fixed with a `push` trigger on `configs/**` and the scripts that
+decide a build — deliberately *not* `build-state.tsv`, which the workflow commits
+itself and would loop on.
+
+**2. The APT dispatch "skipped gracefully" when its token was unset — and it is
+unset.** Both publishers end by dispatching `update-repo` to
+`Citronics/deb-packages`; that hop is cross-repository, so the automatic
+`GITHUB_TOKEN` cannot do it (it is scoped to its own repo). With
+`APT_DISPATCH_TOKEN` missing, the step printed one line and exited 0. Every
+release therefore published to GitHub Releases while apt kept serving the
+previous index — in a **green** run. `1.1.2.1` was built and released today and
+apt knew nothing about it. Fixed: the step now errors, names the required token
+and its scopes, and prints the manual workaround
+(`gh api -X POST repos/Citronics/deb-packages/dispatches -f event_type=update-repo`).
+Verified live — the v1.1.2.2 run went red for exactly that reason and nothing
+else.
+
+**Only Marc can close this one:** a fine-grained PAT (resource owner
+`Citronics`, repository `Citronics/deb-packages`, Contents: read+write), added as
+an **organisation** secret named `APT_DISPATCH_TOKEN` scoped to `citronics-kernel`
+and `initramfs`. An org secret, not two repo secrets: one place to rotate, and
+new repos inherit it. Note it silently breaks again when the token expires, which
+is what item 3 is for.
+
+**3. No fallback when that dispatch is missed.** Added a daily `schedule` to
+`deb-packages/update-repo`. The job rebuilds the index from every release's
+assets, so it is idempotent; a daily pass bounds a missed dispatch to 24 h
+instead of forever.
+
+**4. The initramfs auto-tag counted tags instead of taking the maximum.** The
+identical bug citronics-kernel already hit at `v3.2-rc3.9` (eight tags existed,
+the highest was `.15`). Harmless until the first gap in the sequence, then every
+build dies on "tag already exists". Ported the highest-suffix logic, numeric
+sort, with the existing-tag guard loop.
+
+**5. (found on the device) The initramfs deb shipped files owned by uid 1001.**
+`dpkg-deb --build` without `--root-owner-group` keeps the builder's ownership, so
+`1.1.2.1` installed `/usr/share/citronics/detect-dtb.sh` as `1001:1001` — the
+GitHub runner's own user. Root *sources* that file from
+`/etc/kernel/postinst.d/zz-citronics-boot`, so on any machine where uid 1001 is
+an ordinary user, that user could rewrite what root runs on the next kernel
+upgrade. Fixed in `build.sh`; `1.1.2.2` is root-owned. The kernel debs were
+checked and are already `root/root`.
+
+**A trigger cannot be fired by the push that adds it.** The initramfs workflow
+had *zero* runs since it was created, because the commit adding it and the commit
+changing `initramfs/**` arrived in the same push. Proven rather than assumed: a
+manual dispatch worked (so Actions, permissions and YAML were all fine), and the
+next content push — `build.sh` for item 5 — produced a `push`-event run
+immediately.
+
+**Provenance correction for the overnight soak.** The rig's
+`linux-image-6.12.101-citronics-lime-fp2 3.2~rc3.17` came from
+`/var/lib/dpkg/status` alone — it is a **locally built** deb
+(`~/Projects/msm8974-scratch/linux-image-…_3.2~rc3.17_armhf.deb`), installed over
+the apt-supplied `.16`. So the 8.7 h result validated a local build, not a CI
+artifact. CI's rebuild will also be numbered `3.2~rc3.17` (the next suffix after
+`.16`), which means the two share a version string while being different files:
+apt on the rig will consider itself up to date and **not** replace the local
+build. The rig must therefore be given the CI deb with `--reinstall` before its
+result can be attributed to a published artifact — which also re-runs the DTB
+detection there, so it doubles as the host-mode row of the detection matrix.
+
+### Side note: pushing when GitHub SSH stalls
+
+`git push` over SSH hung twice mid-session (`ssh -T git@github.com` timed out
+while the key was loaded and `gh api` over HTTPS worked fine — the same stall
+recorded on 2026-08-03). Workaround that does not touch the configured remote:
+
+```
+git -c credential.helper='!f() { echo username=x-access-token; echo "password=$(gh auth token)"; }; f' \
+    push https://github.com/<org>/<repo>.git HEAD:<branch>
+```
