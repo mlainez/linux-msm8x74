@@ -2191,3 +2191,101 @@ presence is decided by BPD (thermistor / battery-ID), and the carrier has
 neither. If host mode instead reports `present`, detection would pick the phone
 DTB on a board with no panel and no pack — a real defect, and the reason to test
 it rather than assume.
+
+## 2026-08-07: DTB auto-detection across three fixtures + the release plumbing that hid a broken kernel
+
+Marc connected a real FP2 with a battery — the fixture the §1.1 release gate has
+always been waiting for — and asked for the detection logic to be validated across
+all three power configurations. Testing it required the *released* artifacts rather
+than hand-copied files, which exposed four defects in the release plumbing.
+
+### Release plumbing: four defects, all now fixed
+
+1. **`citronics-kernel` never rebuilt on a config change.** `changed-kernels.sh`
+   hashes `configs/<name>.config` precisely so a config edit rebuilds even when the
+   source has not moved — but nothing *invoked* the workflow on such a push
+   (`on:` had only `repository_dispatch` + `workflow_dispatch`). So the fix adding
+   `CONFIG_KRAITCC`/`CONFIG_QCOM_HFPLL` sat unbuilt and the published deb kept the
+   broken config. Fixed by a `push` trigger on `configs/**` and the scripts that
+   decide a build, excluding `build-state.tsv` (the workflow commits that itself,
+   which would loop). Commit `49a411e`.
+2. **`APT_DISPATCH_TOKEN` is unset, and both publishers "skipped gracefully".**
+   The cross-repo hop that tells `deb-packages` to regenerate the index cannot use
+   the automatic `GITHUB_TOKEN` (it is scoped to its own repo), so every release
+   published to GitHub while apt kept serving the old index — inside a **green**
+   run. `initramfs` v1.1.2.1 was published today and apt knew nothing about it.
+   Both workflows now `::error::` and exit 1, naming the fix and the manual
+   workaround. Commits `49a411e`, `2b44499`. **Owed to Marc:** create a
+   fine-grained PAT (owner Citronics, repo `deb-packages`, Contents read+write) and
+   add it as the *organisation* secret `APT_DISPATCH_TOKEN`.
+3. **`deb-packages` had no fallback path.** Added a daily `schedule`, so a missed
+   dispatch self-heals within 24 h instead of forever. The job is idempotent — it
+   rebuilds the index from every release's assets. Commit `bfa5cbb`.
+4. **The initramfs auto-tag counted tags instead of taking the highest suffix** —
+   the identical bug `citronics-kernel` already hit at `v3.2-rc3.9`. It works until
+   the first gap in the sequence, then `git tag` dies. Ported the numeric
+   highest-suffix derivation. Commit `2b44499`.
+
+**Provenance correction on the overnight soak.** There is no CI `v3.2-rc3.17`: the
+`3.2~rc3.17` that ran the 8.7 h BOINC soak is a **locally built** deb
+(`~/Projects/msm8974-scratch/linux-image-6.12.101-citronics-lime-fp2_3.2~rc3.17_armhf.deb`),
+installed with `dpkg -i`; apt only ever offered the DVFS-less `.16`. The previous
+entry's claim that "CI did rebuild" was wrong — the rig proved the *content* of
+6.12/rc + the fixed config, not a CI artifact. A CI build is running now and will
+take the same version string, so the rig must be re-installed from the published
+deb before its result can be attributed to the shipping artifact.
+
+### Two rig defects found while getting apt to work there
+
+- **The USB default route blackholed the rig.** `rig-nat-route.service` installed
+  `default via 10.0.42.2 dev usb0` with no metric (= 0), which outranks a DHCP
+  default (600), and Linux uses a route whose link is down by default. The moment
+  the rig moved to WiFi and the cable came out, every packet went to a dead usb0:
+  no apt, no DNS, and BOINC re-asking its scheduler every two minutes for nothing.
+  Fixed to `metric 1000` plus `net.ipv4.conf.all.ignore_routes_with_linkdown=1`
+  (`ubuntu/stage/fix-rig-uplink.sh`), so USB is a fallback instead of a trap.
+- **The clock was 49 min 19 s behind** (no NTP while the route was broken; a
+  battery-less board has no RTC backup), so apt refused the Release file as "not
+  valid yet". Re-synced. This makes the overnight duration **conservative, not
+  optimistic**: the telemetry timestamps and `/proc/uptime` come from the same slow
+  clock, so real elapsed time was at least the 8.7 h reported.
+
+### Detection results — two of three fixtures measured
+
+Both devices now run the **packaged** `citronics-initramfs 1.1.2.1` from apt
+(`dpkg -S` confirms package ownership), so this tests the shipped artifact:
+
+| Fixture | `citronics_battery_state` | chosen DTB | correct? |
+|---|---|---|---|
+| Phone + battery (`smbb-bif present=1 status=Charging`) | `present` | `qcom-msm8974pro-fairphone-fp2.dtb` | yes |
+| Rig, debug mode (`present=0`) | `absent` | `qcom-msm8974pro-fairphone-fp2-rig.dtb` | yes |
+| Rig, **host mode** | — | — | pending |
+
+`test-detect-dtb.sh` passes 15/15 on both devices, including the phone branch that
+a battery-less rig cannot exercise. Both DTBs are confirmed present in the kernel
+package's flat `/usr/lib/linux-image-<kver>/` directory, which is where the helper
+looks — detection's premise holds.
+
+### PRE-REGISTRATION — fixture 3, the rig in host mode
+
+Written before the measurement, so the prediction cannot be fitted afterwards.
+
+In host mode the PD feed sits on the **battery pins** (VBAT_SNS) rather than
+USB_IN, so the board is powered through the path a pack would use. The question is
+whether the PMIC then claims a battery is present.
+
+**Prediction: `present=0` → `absent` → the rig DTB is still chosen (PASS).**
+Rationale: PM8941 battery-presence detection (BPD, `BAT_IF` `BPD_CTRL`) keys off
+`BATT_THERM` and/or `BATT_ID`, and our batif-safety work programs it explicitly.
+The carrier has neither a thermistor nor an ID resistor, so a bare voltage on
+VBAT_SNS should not satisfy BPD.
+
+**The failure mode this test exists to catch:** if presence reads 1, detection
+picks the **phone** DTB on the rig — panel enabled, the 4.45 V input floor restored,
+and XPU err-fatal armed. That is precisely the boot that killed the rig before
+(`vin-min-onset-uvlo`), so a wrong answer here is not cosmetic.
+
+**Decision rule.** `present=1` on the rig in host mode ⇒ battery presence is not a
+sufficient discriminator, and detection must gain a second signal (the obvious
+candidate: absence of the FP2 panel/`gpio-keys` in `/proc/device-tree`, or a
+carrier marker) before it can be trusted to pick a DTB unattended.
