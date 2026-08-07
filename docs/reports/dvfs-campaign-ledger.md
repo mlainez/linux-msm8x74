@@ -2805,3 +2805,34 @@ per-commit rather than a blanket refusal. The storm's most promising lead is our
 (sensor 0), and it needs a reproduction before a patch. The MDP5 and interconnect
 work should be re-examined from the **6.18** side, where the display is unsolved
 and where those commits actually bear on live questions.
+
+### Correction: `IMAGES_DISPATCH_TOKEN` is set, and the images DO track the newest initramfs
+
+I listed `IMAGES_DISPATCH_TOKEN` among the missing secrets. That was inferred from
+reading the guard in `deb-packages/update-repo.yml`, not measured, and it is wrong.
+
+Evidence: `update-repo` completed at **08:34:40** and `Citronics/debos-citronics`
+started a `deps-updated` **`repository_dispatch`** build at **08:34:42** — two
+seconds later — one of five such image builds today (06:25, 06:30, 06:46, 06:48,
+08:34). The dispatch works, so the secret exists.
+
+**The images also track the newest initramfs.** The 08:34 build's log shows it
+installing **`citronics-initramfs_1.1.2.2`**, i.e. the deb is pulled unpinned from
+apt at image-build time, so each rebuild picks up whatever is current.
+
+So only **two** tokens are actually missing, not three:
+
+| secret | state |
+|---|---|
+| `KERNEL_DISPATCH_TOKEN` (linux-msm8x74) | **missing** — `notify-kernel-build` fails in ~6 s, verified in the run log |
+| `APT_DISPATCH_TOKEN` (citronics-kernel, initramfs) | **missing** — verified in both run logs |
+| `IMAGES_DISPATCH_TOKEN` (deb-packages) | **present and working** |
+
+**Practical consequence worth remembering:** the image flashed onto the DUT today
+is the **2026-07-26 nightly**, which carries citronics-initramfs **1.1.2** — the
+version *without* DTB detection. That is why the kernel postinst logged
+"deviceinfo_dtb not set, falling back to qcom-msm8974pro-fairphone-fp2.dtb", i.e.
+the blind phone fallback rather than detection. A freshly built image (today
+08:34) already contains 1.1.2.2 and would exercise `detect-dtb.sh` instead. When
+testing detection end to end as a user would, pull a current image rather than a
+nightly from the local scratch directory.
