@@ -2592,3 +2592,62 @@ Promising but **not yet a result**: a single clean window does not establish the
 effect. The reversal is mandatory — re-arm err-fatal and show the resets come back —
 before disarming can be credited, and the 7 s crash of boot #2 still has no
 explanation and must not be quietly dropped.
+
+## EXP-P1: INVALIDATED — the fixture was changed under the experiment
+
+EXP-P1 never got past its first sample, and its verdict must not be reported as
+a result. The record, from the host-side monitor:
+
+| Time (UTC) | Observation |
+|---|---|
+| 07:08:24 | run starts, `boot_id=2674b1a3`, `markers_before=5`, ModemManager+rmtfs masked and confirmed inactive |
+| 07:08:29 | first idle sample: cpu0 **2265.6 MHz**, 56 °C, `Charging/Fast`, 4595 transitions |
+| 07:09:00 | **unreachable** — reset ~30 s into the run |
+| 07:11:11 | back, but `boot_id=73b59e0b` and **markers=7**: two further resets |
+| 07:11–07:31 | reachable and stable, yet `exp-p1.log` frozen at the 07:08:29 line — the `systemd-run` unit does not survive a reboot, so nothing was sampling |
+| 07:32:29 | **unreachable** again |
+| 07:33–07:39 | back as `boot_id=e9e7133f`, and `/var/log/soak/boots.log` **no longer exists** |
+| 07:41 | device is in **fastboot** (`18d1:d00d`, serial `e4f4c070`) |
+
+Two independent things went wrong, and only one of them is mine.
+
+**Mine:** `systemd-run --unit=exp-p1` does not survive a reset, so the moment the
+board went down the sampler stopped, and the 20 minutes that followed produced a
+frozen log that *looked* like a running experiment. Any future soak launcher must
+be a **systemd unit with `Restart=always` and `WantedBy=multi-user.target`**, like
+`phone-telemetry`, which did keep sampling across the same resets. A run whose
+own instrument dies with the first failure cannot measure a failure rate.
+
+**Not mine:** the disappearance of `/var/log/soak/boots.log` and the board ending
+up in fastboot are not effects an idle load test can produce. Together with three
+earlier observations — a `sudo` command in boot -1's journal that this session
+never issued, an `apt-get install` of my exact package list running under a pid I
+did not spawn, and `phone-setup.sh` being edited on the host mid-session — the
+fixture was being driven by something else at the same time. Marc has been asked
+to confirm.
+
+**What survives from CP-PHONE regardless**, because it was measured before any of
+this and does not depend on the soak:
+
+- Detection is correct on a phone, falsifiably: a deliberately wrong `fdt` line
+  naming the rig DTB was rewritten to the phone DTB by the kernel postinst;
+  15/15 packaged tests pass on the device; the helper is now root-owned.
+- The published artifacts install and run: `citronics-initramfs 1.1.2.2` and
+  `linux-image-6.12.101-citronics-lime-fp2 3.2~rc3.17` from apt, the deb verified
+  to carry `CONFIG_KRAITCC=y`/`CONFIG_QCOM_HFPLL=y`.
+- DVFS on a phone reaches the **full 2265.6 MHz vendor ceiling** across four
+  schedutil policies with the APC sequencer configured — the rig's 1267.2 MHz was
+  a thermal artefact of a bare board, as the earlier caveat predicted.
+- The charger engages on a real pack (`Charging`, `Fast`, `charge cycle running`),
+  while the ported battery telemetry is not exposed through `power_supply`.
+- **Abrupt PS_HOLD resets do happen on this phone** and are provably not orderly
+  reboots (zero shutdown log lines against 27 for the one real reboot; `pstore`
+  armed at `0x80000@0x30f80000` and empty every time, so they never reach the
+  kernel's crash path). What is *not* established is their rate, their trigger, or
+  whether load matters — the contaminated fixture cannot support any of those
+  claims, and the one load-onset coincidence remains a single datapoint.
+
+**Next, once the fixture is exclusively ours:** reflash, reinstall the same two
+published artifacts, arm a *persistent* soak unit, and run EXP-P1 again in the
+registered order — idle control first, then load — with the modem stack masked
+from the first boot rather than from inside the run.
