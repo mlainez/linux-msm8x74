@@ -2881,3 +2881,56 @@ into the phone while I was aiming at the rig. It was caught only because the pro
 printed `uname -r` and battery presence as identity checks. Rule: with more than
 one device attached, **verify identity from the response, never from the address**,
 and prefer physically detaching the one not under test.
+
+## 2026-08-07: DTB detection fixture 2 validated through the shipping path
+
+Re-run properly on the rig after a **fresh nightly image** (built today 08:34,
+carrying citronics-initramfs **1.1.2.2**) and the released kernel deb from apt —
+no hand-copied helper, no `deviceinfo_dtb`, exactly the commands a colleague runs
+(`INSTALL-FP2-KERNEL.md`).
+
+**Detection declined to guess when it could not deliver.** Before our kernel was
+installed, with the 6.16.12 image kernel in place:
+
+```
+battery_state: absent
+DTB auto-detected: qcom-msm8974pro-fairphone-fp2.dtb
+  (no battery, but this kernel package ships no rig DTB; override with deviceinfo_dtb)
+```
+
+Verified: that package contains **0** rig DTBs. So it fell back to the phone DTB
+*and said why*, rather than selecting a file that does not exist — the right
+failure mode, and one worth keeping.
+
+**With our kernel, it decided correctly**, and the postinst did all three steps:
+
+```
+DTB auto-detected: qcom-msm8974pro-fairphone-fp2-rig.dtb (no battery present => carrier rig; ...)
+Copied DTB: /usr/lib/linux-image-6.12.101-citronics-lime-fp2/qcom-msm8974pro-fairphone-fp2-rig.dtb
+extlinux.conf fdt -> /qcom-msm8974pro-fairphone-fp2-rig.dtb
+```
+
+After the reboot, confirmed from the **running** device tree rather than the
+install log:
+
+| check | value |
+|---|---|
+| `/proc/device-tree/model` | **"Fairphone 2 (carrier rig, no battery)"** — a string only the rig DTS defines |
+| `mdss` status | **disabled** — the rig DTB's panel disable is live |
+| `qcom,xpu-err-fatal` | absent |
+| cpufreq | 4 policies, schedutil, max 2265600 |
+| battery | `present=0` |
+
+### Fixture status
+
+| fixture | battery_state | chosen DTB | verified how |
+|---|---|---|---|
+| phone + battery | `present` | `…-fp2.dtb` | packaged helper, 15/15 unit tests on-device |
+| rig, debug mode | `absent` | `…-fp2-rig.dtb` | **end to end from apt on a fresh image**, confirmed by the live model string |
+| rig, **host mode** | — | — | still unmeasured; prediction and decision rule already on record |
+
+The colleague install guide is therefore validated on real hardware for both the
+phone and the carrier board, including the ordering constraint it documents: the
+fresh image necessarily boots the **phone** DTB first (the 6.16 package has no rig
+DTB), which carries the 4.45 V input floor that killed this fixture at load onset,
+so the board must stay idle between flashing and installing our kernel.
