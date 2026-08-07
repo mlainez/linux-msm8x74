@@ -2445,3 +2445,99 @@ Registered before running:
   `sudo` command in boot -1's journal that this session did not issue). Every
   verdict below must be checked against the boot-marker count and the journal, and
   discarded if an unexplained reboot or foreign command appears mid-run.
+
+## 2026-08-07: the phone-with-battery gate FAILS on the shipping artifact — armed XPU err-fatal
+
+The phone gate finally ran on a real FP2 with a battery, using the **published**
+artifacts (`linux-image-6.12.101-citronics-lime-fp2` `3.2~rc3.17` from apt,
+`citronics-initramfs` 1.1.2.2). Both installed cleanly, detection picked the phone
+DTB by itself, and the kernel came up with four schedutil policies, 14 OPPs and a
+**2265.6 MHz ceiling** — the first time the top of the ladder has been reachable at
+all, since the rig sits thermally pinned (`scaling_max_freq` was 652800 during its
+soak, and it never exceeded ~1267 MHz for nine hours).
+
+**Then it silently reset every ~90–120 s**, seven boot markers in ~six minutes.
+
+### The signature, and what it ruled out
+
+| Observation | Consequence |
+|---|---|
+| `poff=0x0002` PS_HOLD on every reset, `warm_reset=0x0002` | the SoC/TZ dropped PS_HOLD deliberately; **not** a supply cut (those give `0x2000` UVLO or none) |
+| `/sys/fs/pstore` **empty** while ramoops is registered at 0x30f80000 | no panic, no oops — nothing for the kernel to record |
+| kernel log ends mid-idle with no complaint at all | the kernel was not the actor |
+| resets occurred both with and without four-core load | not load-correlated, so not the DVFS-killer profile |
+
+Two hypotheses were tested statically and **refuted before touching the device**:
+
+- **Missing DVFS fixes in the rc branch.** All eight topics — `spm-vsel-integrity`
+  (the killer fix), `krait-cpufreq`, `krait-clk`, `spm-vsel-stats`, `krait-apc`,
+  `smbb-engagement`, `vadc-batt-therm`, `smbb-batif-safety` — are ancestors of
+  `6.12/rc`. Content is not the difference.
+- **A config delta in the CI kernel.** Diffing the deb's *expanded*
+  `/boot/config-*` against the validated buildroot `.config` (not the defconfig
+  fragment, which produces false deltas) shows `CPU_IDLE`, `ARM_CPUIDLE`,
+  `QCOM_SPM`, `ARM_QCOM_SPM_CPUIDLE`, `CPU_PM`, `KRAITCC`, `QCOM_HFPLL`,
+  `ARM_QCOM_CPUFREQ_NVMEM`, `CPU_THERMAL` and `QCOM_TSENS` all **identical**. The
+  only substantive difference is `CHARGER_QCOM_SMBB`: validated `=m`, CI `=y`, so
+  the charger and its tier-3 supervisor now probe at boot rather than loading late.
+
+### The actual delta, from our own history
+
+`qcom,xpu-err-fatal` was armed **SoC-wide** in `qcom-msm8974.dtsi`
+(`729ef9a8c17a`, `c90b48c4d227`) — which arms it for every msm8974 board in the
+fork, including Sony, Samsung, Nexus 5 and DragonBoard, none of which we test.
+`937c0a3a5cbb` then disarmed it **on the rig only**. Confirmed live rather than
+from source: `fdtget` found the property in the phone's loaded DTB.
+
+The rig comment already predicted this failure and said so explicitly:
+
+> "…that is what kills it once the radios are up: two PS_HOLD deaths in ~16 min of
+> idle … i.e. the kernel doing nothing, and TZ resetting the SoC anyway. Disarming
+> it ran 43 min idle and 40 min of four-core load … The err-fatal call was
+> originally added on the theory that the unarmed SBL default silently
+> PS_HOLD-resets under multi-core load. **That no longer reproduces** … most
+> plausibly because the real cause was the SPM vsel cache poisoning fixed in
+> c1076b55dd05. **Left in place for the phone, where it has not been retested with
+> a battery.**"
+
+So the justification for arming had already collapsed, and it survived on the phone
+only because that retest had never happened. This *is* that retest, and it fails.
+Every validated phone soak (R6/R7/R13) ran **radios off** (`post-build-no-wcnss.sh`),
+so armed err-fatal + radios up + a battery is a combination never previously run.
+
+### EXP-P1 — disarm on the phone (DT-only, no rebuild)
+
+Patched the loaded DTB in place per build economy: `fdtput -d … /firmware/scm
+qcom,xpu-err-fatal`, verified by decompiled diff (**exactly one line**, 70680 →
+70668 bytes), md5 `118c1dea…` → `4e757d51…`, armed original preserved on-device as
+`…dtb.xpu-armed`. Confirmed in the **running** DT: `/proc/device-tree/firmware/scm/`
+holds only `clock-names clocks compatible name`.
+
+Watch in progress: 20 min with radios up and no load, ≈10× the ~90–120 s armed
+MTBF.
+
+### Next: identify the violator (the part that actually matters)
+
+Disarming is a **diagnostic, not a fix** — the vendor arms it unconditionally, and
+Android's TZ log shows XPU `0xe3`/`0xe4` with **count 0**, i.e. Android arms it and
+has no violation. We arm it and have one. A clean 2×2 isolates the master, and the
+third cell is the decisive one for Marc's modem hypothesis:
+
+| err-fatal | radios | expectation |
+|---|---|---|
+| armed | up | dies ~90–120 s (**measured**) |
+| disarmed | up | survives (EXP-P1, running) |
+| **armed** | **modem stopped** | survives ⇒ convicts the MSS; dies ⇒ exonerates it, look at WCNSS/ADSP |
+| disarmed | modem stopped | control |
+
+Stop the MSS by **device name** (`fc880000.remoteproc`), never by `remoteprocN`:
+the numbering is probe-order dependent and differs between fixtures — on the rig
+`fc880000` is `remoteproc2`, on the phone `remoteproc1`, so an index would silently
+stop WCNSS instead and change a different variable.
+
+**Product decision to make once EXP-P1 reports** (Marc's call, not mine): removing
+`qcom,xpu-err-fatal` from the shared `qcom-msm8974.dtsi` restores mainline
+behaviour — mainline never arms it and tolerates the violation silently — and stops
+imposing our experiment on boards we cannot test. That would also make the rig's
+`/delete-property/` redundant. The alternative, keeping it armed and deleting it
+per-board, leaves every untested board armed.
