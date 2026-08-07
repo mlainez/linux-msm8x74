@@ -1712,12 +1712,46 @@
 			clock-names = "core", "bus", "iface";
 
 			/*
-			 * Arm TrustZone XPU-violation err-fatal at boot, as the
-			 * vendor kernel does. Without it the SBL-default XPU
-			 * error handling silently PS_HOLD-resets the SoC under
-			 * multi-core CPU load.
+			 * TrustZone XPU-violation err-fatal is deliberately NOT
+			 * armed here, unlike the vendor kernel (scm-xpu.c arms it
+			 * unconditionally).
+			 *
+			 * This dtsi used to arm it, on the theory that the unarmed
+			 * SBL default silently PS_HOLD-resets the SoC under
+			 * multi-core load. That theory did not survive contact
+			 * with the hardware. After the SPM vsel cache-poisoning
+			 * fix (c1076b55dd05 on the 6.12 line) a disarmed kernel
+			 * ran 40 min of four-core load and 43 min idle clean on
+			 * the carrier rig, and on 2026-08-07 a phone with a
+			 * battery showed the exact opposite of the original claim:
+			 *
+			 *   armed      four resets in ~15 min, PS_HOLD with pstore
+			 *              empty and no kernel message before the cut,
+			 *              at intervals of 7/96/142/584 s - unrelated
+			 *              to load, and present at idle
+			 *   disarmed   21 min unbroken, while absorbing seven modem
+			 *              fatal-error/recovery cycles that armed
+			 *              err-fatal would have escalated
+			 *
+			 * Arming changes only TZ's RESPONSE to a violation, from
+			 * "log and continue" to "reset the SoC". XPU denies the
+			 * offending access either way, so isolation is unchanged;
+			 * what arming buys is a loud failure, and what it costs is
+			 * the machine. Mainline never arms it, which is why every
+			 * other msm8974 board tolerates these faults silently.
+			 *
+			 * The violation itself is NOT fixed by this and stays open:
+			 * the radios DMA into the carveouts, our reserved regions
+			 * sit at mainline addresses while the vendor's PIL loads
+			 * adsp at 0x05a00000 and wcnss at 0x06e00000, and TZ
+			 * records the offending master in its diag region at
+			 * 0xfe805720 (vendor tz_log) which mainline does not map.
+			 * Until that master and region are identified, do not
+			 * re-arm this property: it converts a fault mainline
+			 * tolerates into an unrecoverable reset on every board
+			 * built from this dtsi, including the Sony, Samsung,
+			 * Nexus 5 and DragonBoard targets we cannot test.
 			 */
-			qcom,xpu-err-fatal;
 		};
 	};
 
