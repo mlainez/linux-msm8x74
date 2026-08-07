@@ -2836,3 +2836,48 @@ the blind phone fallback rather than detection. A freshly built image (today
 08:34) already contains 1.1.2.2 and would exercise `detect-dtb.sh` instead. When
 testing detection end to end as a user would, pull a current image rather than a
 nightly from the local scratch directory.
+
+## 2026-08-07: clean-install idle result — 59 min unbroken with err-fatal disarmed
+
+The first datapoint for the disarm taken on a **stock user configuration**: fresh
+`userdata` flash, kernel installed from apt (`3.2~rc3.18`), no soak units, no
+telemetry, no scripts on the device, observed only from the host by ping plus
+`/proc/uptime` and `boot_id` over SSH.
+
+| | value |
+|---|---|
+| duration | **59 min, one `boot_id`** (`e5d06946`), uptime monotonic to 3508 s |
+| samples | 60, of which resets **0**, unreachable **0** |
+| load | 0.06–0.59 (idle) |
+| `journalctl --list-boots` | 2 boots, both accounted for (image kernel, then ours) |
+| `/var/lib/systemd/pstore/` | **0** records — no crash console, consistent with no crash |
+| err-fatal in live DT | absent |
+| DVFS | 4 policies, schedutil, 300000–2265600 kHz |
+
+**Against the armed baseline on the same phone, same battery, same radios:** four
+crashes in ~15 min at 7/96/142/584 s. This run is ~6× the longest armed interval
+and ~4× the entire armed observation window.
+
+**What this does and does not establish.** It is a strong idle result and the
+cleanest configuration yet — nothing of ours on the device to confound it. It is
+still **not** the controlled A/B: the reversal was never completed (the armed stock
+boot ran 403 s and then went to fastboot), and boot #2's 7 s crash remains
+unexplained. And it is **idle only** — the §1.1 gate needs a load soak on a phone
+with a battery, which has never run.
+
+**Caveat on what this run tested.** The image flashed was the 2026-07-26 nightly
+carrying citronics-initramfs 1.1.2, so the kernel postinst used the blind phone
+fallback, not `detect-dtb.sh`. It reached the right DTB by virtue of being a phone.
+Detection on a battery-less board — the case that actually has to *decide* — is
+still unexercised from a released deb on a current image.
+
+### Instrument note: two devices on 10.0.42.1 cannot be told apart
+
+Both the phone and the freshly flashed rig serve DHCP as 10.0.42.1, so the host
+ended up with 10.0.42.2 on *two* interfaces (`enp15s0f3u2u3`, `enp12s0u5`). ICMP
+can be steered (`ping -I <iface>` reached each: 0.239 ms rig, 0.317 ms phone), but
+`ssh -o BindInterface=` **silently fell through to the default route** and logged
+into the phone while I was aiming at the rig. It was caught only because the probe
+printed `uname -r` and battery presence as identity checks. Rule: with more than
+one device attached, **verify identity from the response, never from the address**,
+and prefer physically detaching the one not under test.
