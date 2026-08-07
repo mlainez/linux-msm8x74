@@ -970,3 +970,82 @@ without them, and the CP0 gate will not be skipped again.
 cfg-derived windows including ping-pong; `mdpdump.sh` with self-checks; the
 vendor-offset translation rule (`vendor = kernel + 0x100`); the requirement that
 oracle register captures be bracketed by a display-state check.
+
+---
+
+# START HERE — handoff for the next 6.18 session (written 2026-08-07)
+
+This campaign is deliberately being resumed in a **fresh session** to keep 6.12
+production context out of it. Everything needed to restart cold is below; nothing
+in this file requires the previous conversation.
+
+## The single open question
+
+**The OTM1902B panel never emits TE.** Measured, not inferred:
+
+- EXP-D7.2: `PP_INT_COUNT_VAL` `FRAME_COUNT = 0`, and 161 vsync timeouts vs 1.
+- EXP-D7.3: **0 Hz on the TE line** — the panel does not drive it at all.
+
+Everything MDP-side is eliminated by register comparison against the live Android
+oracle: IOMMU (zero faults, context-bank state identical, BFB programmed), SMP
+allocation `0x000a0a0a`, `LM0_OUT_SIZE = 0x07800438`, the whole ping-pong set
+including `SYNC_CONFIG_VSYNC = 0x001800a5`, the vsync clock, the CTL-category
+fallback, DT **and** runtime pin muxing (`pin 12 (GPIO_12): device fd922800.dsi.0
+function mdp_vsync`), and the MDP latch itself.
+
+## Where to start: the panel's own initialisation
+
+Compare our generated OTM1902B on-sequence against the vendor's
+`dsi-panel-otm1902b-1080p-cmd.dtsi` **command by command**:
+
+- the DCS `0x35` (set_tear_on) parameter — present? correct value?
+- `te-dcs-command` / `wr-mem-start` `0x2c` / `wr-mem-continue` `0x3c`
+- whether `set_tear_on` actually reaches the panel and is ACKed
+- panel rail and reset ordering relative to the first DCS write
+
+## Fixture state, exactly as left
+
+- **DUT** `e4f4c070`, real FP2 + battery, lk2nd (`product: lk2nd-msm8974`).
+  It has been **reflashed with Ubuntu for 6.12 work**, so the 6.18 test image is
+  gone: **reflash from `output-618obs` before resuming**. That buildroot config
+  carries the D7.3 diagnostic with TE diverted, and puts USB networking on
+  **10.0.43.1** (host .43.2) so it cannot clash with the 6.12 rig on 10.0.42.x.
+- **Android oracle** `81314fe6` (adb) — the reference for every register
+  comparison. Keep `svc power stayon true` and bracket the display state before
+  *and* after any capture: an earlier capture taken after screen timeout recorded
+  residue, not a working pipeline.
+- 6.18 kernel debs are published and installable: `3.2~rc3.18`
+  (`6.18.43-citronics-lime-fp2-gf2757a40f074`), built from `6.18/rc`
+  `f2757a40f074`, with `CONFIG_KRAITCC`/`QCOM_HFPLL` present and
+  `qcom,xpu-err-fatal` **absent** from the DTB.
+
+## Two instrument traps that already cost retractions
+
+1. **`mdp5_regs` offsets.** Vendor debugfs offsets are kernel `mdp_phys` offsets
+   **+0x100**, and the version word `10020001` is mirrored at both bases, so a
+   naive sanity check passes while every reading is wrong. That produced four
+   retracted claims. Windows must be derived from `mdp5_cfg_get_hw_config()`,
+   never hardcoded — calibrate the instrument before trusting a single value.
+2. **pstore on a systemd distro.** `/sys/fs/pstore` is *always* empty:
+   `systemd-pstore.service` moves records to **`/var/lib/systemd/pstore/`** at
+   boot and clears the source. Read the latter, and include it in any evidence
+   pull before reflashing — five `console-ramoops-0` records were lost this way
+   on 2026-08-07.
+
+## Related open work that is NOT a blocker for the panel
+
+`qcom,xpu-err-fatal` is now disarmed SoC-wide on both series, so an XPU violation
+no longer resets the board — but **the violation itself is unfixed**. The leading
+hypothesis is a carveout mismatch: our reserved regions sit at mainline addresses
+(`mpss 0x08000000+0x5100000`, `mba 0x0D100000`, `wcnss 0x0D200000+0xA00000`,
+`adsp 0x0DC00000+0x1900000`) while Android's PIL loads **adsp at 0x05A00000** and
+**wcnss at 0x06E00000**. XPU regions are programmed by SBL/TZ against the vendor
+map, so a master can land outside what it is permitted. Confirming this needs the
+oracle's full map recaptured, plus the mpss/mba ranges. TZ records the offending
+master in its diag region at `0xfe805720` (vendor `tz_log`), which mainline does
+not map — that reader (O1) is still unwritten.
+
+Also worth re-examining from this side, since they bear on live 6.18 questions and
+were dismissed only for 6.12: `a6f081ec4ce6` (drm/msm/mdp5: Remove MSM8974v1),
+`e224e3a167bc` (drop MDP5 1.0 workarounds), and the interconnect rewrite onto
+`icc-rpm` — 49 upstream commits touch msm8974 between v6.12 and v7.2-rc6.
