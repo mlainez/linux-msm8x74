@@ -2066,3 +2066,76 @@ throttling engaged, with no silent reset. That is the first evidence outside our
 soak harness. The remaining gate to `6.12/release` is unchanged and unrelated:
 **validation on a phone with a battery**, where the charger's presence-vs-`bat_ready`
 split and charge engage/terminate have never been exercised.
+
+## 2026-08-07 morning: overnight continuation of the BOINC test — 8 h 44 min unbroken
+
+Marc left the rig running overnight on external power after the 20:00 power-source
+change ("I'll let it on for the night and we will see in the morning if it
+rebooted"). It did not reboot.
+
+**The verdict rests on three independent pieces of evidence, not on one:**
+
+| Evidence | Reading |
+|---|---|
+| `uptime` | **up 8 h 50 min** at 04:50 UTC |
+| live `boot_id` | `2c8f9e79-6124-4cf8-9929-fdb6d022a209` — *identical* to the 20:00:07Z marker |
+| `/var/log/soak/boots.log` | still **4** markers; no fifth appeared |
+| `telemetry.log`, session 5 | 1024 samples, uptime 28 s → 31 477 s, **zero gaps > 60 s** in the 30 s cadence |
+| worker processes | four `sidock` at `ELAPSED 08:50:20`, ~98 % CPU each — never restarted |
+
+The four `sidock` elapsed times matching total uptime is the strongest single
+signal: the load was continuous, so this is 8.7 h of *sustained* four-core work,
+not an idle night.
+
+**Session 5 envelope (20:00:08Z → 04:44:18Z, external power, radios on WiFi):**
+
+| Quantity | Value |
+|---|---|
+| zone temperature | median **82 °C**, p99 87 °C, max **88 °C** |
+| USBIN | min **4.773 V**, mean 4.874 V, max 4.928 V |
+| distinct OPPs | 9, from 300 MHz to **1267.2 MHz** (throttled ceiling) |
+| cooling-device states, live | cpu0 12/13, cpu1 6/13, cpu2 6/13, cpu3 11/13 |
+| per-core, live | 422.4 / 1190.4 / 1036.8 / 729.6 MHz, every core `cur == max` |
+| load average | 4.18 |
+
+`cur == max` on all four cores with the cooling devices mid-range is the governor
+sitting *exactly* on the thermal ceiling for nearly nine hours — schedutil asking
+for more, the thermal governor granting only what the 88 °C trip allows, and the
+two agreeing sample after sample without a single excursion or collapse.
+
+Note the ceiling difference from session 3: 1267.2 MHz here versus 1958.4 MHz
+observed early. Nothing regressed — the early figure is from the first minutes
+before the die heat-soaked. It confirms the earlier caveat that a bare board on a
+carrier with no chassis is thermally bound.
+
+**Cumulative real-workload exposure across both sessions: ~12.8 h wall-clock
+(4.03 h + 8.74 h), 48.3 CPU-hours delivered** (sum of `current_cpu_time` over the
+four tasks: 173 898 s), with **no unexplained reset in either session**. The only
+reboots in the whole log are the four accounted-for ones, all before 20:00, each
+explained (kernel swap, deliberate reboots, and Marc's power-source change).
+
+**Zero work units completed** — and that is expected, not a fault: these are
+`ebola_RdRp_v1_sidock` units at 5.33–5.58 % done with ~219 CPU-hours remaining
+*each*. Throughput on a throttled MSM8974Pro is simply low; the useful signal here
+is stability, not credit. (The "6 completed" figure in the previous entry was read
+at that time and those results were reported and purged; nothing in the current
+journal contradicts it, but it cannot be re-derived now.)
+
+**One pending item from the previous entry is now closed:** the installed package
+is `linux-image-6.12.101-citronics-lime-fp2` version **`3.2~rc3.17`**, and DVFS
+demonstrably works (13 OPPs, four schedutil policies). CI did rebuild with
+`CONFIG_KRAITCC` / `CONFIG_QCOM_HFPLL`, so the broken `3.2~rc3.16` is superseded.
+
+**Verdict.** The §1.1 stability gate now has a *nine-hour* real-workload datapoint
+on distro userspace, on top of the 4 h one, both at the thermal limit. The gate to
+`6.12/release` remains exactly what it was and is unrelated to DVFS:
+**validation on a phone with a battery.**
+
+### Instrument correction (recorded so it is not repeated)
+
+My first pass at the continuity analysis reported nine "reboots" in the log. Six
+were artefacts: `gsub()` marks an awk field as a string, so `if (u < p)` compared
+uptimes *lexically* — `"111" < "80"` is true. Boot boundaries are explicit
+`# start boot_id=…` lines in the telemetry file; parse those instead of inferring
+them from uptime deltas. The corrected parser is
+`scratchpad/an.py`-style: split on `# start`, then treat each block independently.
