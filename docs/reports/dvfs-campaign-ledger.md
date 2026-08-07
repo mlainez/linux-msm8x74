@@ -2377,3 +2377,71 @@ recorded on 2026-08-03). Workaround that does not touch the configured remote:
 git -c credential.helper='!f() { echo username=x-access-token; echo "password=$(gh auth token)"; }; f' \
     push https://github.com/<org>/<repo>.git HEAD:<branch>
 ```
+
+## CP-PHONE first results, and EXP-P1 (pre-registered 2026-08-07 09:05 CEST)
+
+**The published artifacts install and detect correctly. Predictions 1 and 2 PASS.**
+
+| Prediction | Outcome |
+|---|---|
+| 1. detection picks the phone DTB unaided | **PASS**, and falsifiably: `extlinux.conf` was deliberately perturbed to the *rig* DTB before the install, and the kernel postinst rewrote it back to `qcom-msm8974pro-fairphone-fp2.dtb`. Live helper agrees (`battery present => phone`), and the packaged test suite passes **15/15 on the device** |
+| 2. DVFS wider than the rig's | **PASS**, decisively: four schedutil policies, **14 OPPs, ceiling 2265.6 MHz** — the vendor maximum — against the rig's thermally bound 1267.2 MHz. `krait-cc: APC power-gate sequencer configured (KPSS 20010000, BHS)`; 3636 transitions in 7 min |
+| 3. charger engages on a real pack | **PARTIAL**. `present=1 status=Charging charge_type=Fast`, and `qcom-smbb: charge cycle running` at t=95 s. But **no `voltage_now`, `capacity` or `temp` properties appear** — identical to the stock-kernel control, so the ported battery thermometry is not visible through `power_supply` on this build. Needs a separate look; it also blinds the phone telemetry's battery fields |
+| 4. no silent reset under load | **FAILED — see below** |
+| 5. the 4.45 V input floor is harmless with a pack | not yet reached |
+
+Installed from apt: `linux-image-6.12.101-citronics-lime-fp2 3.2~rc3.17`, the CI
+artifact, verified before install to contain `CONFIG_KRAITCC=y` and
+`CONFIG_QCOM_HFPLL=y`. Kernel running is `6.12.101-citronics-lime-fp2`.
+
+**Three abrupt resets in four minutes, and the gate did its job.** The board the
+rig could never be — pack, panel and radios all live — reset at 06:55:22,
+06:57:46 and 06:58:58, intervals of 7 s, 2.4 min and 1.6 min. Each carries
+`poff=0x0002` PS_HOLD, and each is provably *not* an orderly reboot: those boots
+contain **zero** shutdown log lines, while the one deliberate reboot (after the
+kernel install) shows the full sequence — `Reached target reboot.target`,
+`Shutting down`, `Syncing filesystems`, 27 matching lines. The remote shell died
+with status 143 (SIGTERM to every process), which is what a reset under you looks
+like from the host.
+
+**The third reset landed 1 s after `phone-load.service` started** — the only load
+onset attempted so far. One datapoint, so load is a *candidate* trigger, not a
+demonstrated one; the other two resets happened at idle.
+
+**ramoops is armed and caught nothing.** `pstore: Registered ramoops as
+persistent store backend`, `ramoops: using 0x80000@0x30f80000`, `lk2nd.pass-ramoops`
+on the cmdline — and `/sys/fs/pstore/` is empty after all three. That is not an
+instrument failure, it is the finding: these resets never enter the kernel's crash
+path. Consistent with every PS_HOLD death in this campaign.
+
+**A confound sits right next to the deaths, and it must go first.**
+`ModemManager` is in a hard crash loop — **126 restarts in the 7 minutes** of the
+current boot, `Failed with result 'signal'` every ~6 s — and `rmtfs` failed once
+with exit 1 before restarting. All three remoteprocs report `running`. A
+userspace segfault cannot itself drop PS_HOLD, but a wedged QMI/rmtfs path into
+the modem can end in a failed subsystem restart, and *that* does reset the SoC.
+Until it is quiet, nothing measured here can be attributed to DVFS.
+
+### EXP-P1: quiet the modem stack, then load
+
+Registered before running:
+
+- **Change exactly one thing**: mask and stop `ModemManager` and `rmtfs`. Nothing
+  about DVFS, thermal, charger or the DTB changes.
+- **Step 1, idle control, 10 min.** Prediction: if the modem path is the killer,
+  the ~90 s death cadence stops. (Weak on its own — the current boot has already
+  idled 7 min *with* the loop — so it is a floor, not a proof.)
+- **Step 2, four-core load, 15 min.** The discriminating step.
+  - **Dies** ⇒ the killer is load/DVFS-related on a phone, with the modem
+    excluded. That contradicts 12.8 h of rig soaks and localises the difference to
+    what the rig lacks: pack, panel, radios, and the vendor 4.45 V input floor.
+  - **Survives** ⇒ either the modem stack was the killer, or load is not a
+    trigger; then re-enable the modem under load to separate those two.
+- **Instrumentation must survive the death**: the sampler runs *on the device*,
+  detached, fsync'ing every 5 s to `/var/log/soak/exp-p1.log`, so the last line
+  before a reset is the evidence. Boot markers and the 30 s telemetry keep
+  running as the independent record.
+- **Interference detector**: a second operator was observed on this phone (a
+  `sudo` command in boot -1's journal that this session did not issue). Every
+  verdict below must be checked against the boot-marker count and the journal, and
+  discarded if an unexplained reboot or foreign command appears mid-run.
