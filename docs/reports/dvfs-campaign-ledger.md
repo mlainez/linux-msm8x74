@@ -2934,3 +2934,52 @@ phone and the carrier board, including the ordering constraint it documents: the
 fresh image necessarily boots the **phone** DTB first (the 6.16 package has no rig
 DTB), which carries the 4.45 V input floor that killed this fixture at load onset,
 so the board must stay idle between flashing and installing our kernel.
+
+### Correction to the same-day storm entry: "does not reproduce" was under-powered, and it is NOT rig-only
+
+Two things in my entry above are too strong, and the earlier record already
+contained the better answer.
+
+**1. "Does not reproduce" rested on two 20-second windows.** The phenomenon was
+already characterised in this ledger as **bursty, not chronic**: mean 371/s with
+peaks of **6157 and 7945/s**, present in **13 of 77 samples** (~17 %). Two short
+windows against a ~17 % duty cycle can easily land in quiet periods, so "0 irq/s
+over 20 s" is weak evidence of absence, not the demonstration I described. Any
+future check must sample continuously across the whole thermal-equilibrium phase,
+not spot-check it.
+
+**2. It is not limited to the battery-less rig.** Both fixtures have shown it:
+
+| fixture | condition | observation |
+|---|---|---|
+| rig (no battery) | BOINC, pinned at the 88 °C trip | ~25 % of a core, 7 251 351 interrupts (~500/s mean) |
+| **DUT (with battery)** | clean boot, 84–87 °C | bursts: mean 371/s, peaks 6157 and 7945/s, 13/77 samples |
+
+The battery is therefore not the variable — tsens reads die temperature and has no
+relation to the pack. The common factor is the die sitting in the **84–88 °C**
+band, i.e. at a passive trip with the governor active.
+
+**3. The prime suspect was already recorded, and it is better than mine.** The
+driver's own comment states there is only **one interrupt control register for all
+11 sensors** and that monitoring more than one yields inconsistent results — but it
+applies that constraint only to `VER_0`, while msm8974 is **`VER_0_1`**, so
+`tsens_irq_thread()` does not stop at the master sensor and drives all 11 through
+the shared register. My "sensor 0 has no thermal zone" observation is a detail
+*inside* that same defect (an unzoned sensor is additionally `continue`d past and
+so never cleared), not an independent lead.
+
+**Also still open in the same temperature band, and possibly the same root cause:**
+the thermal governor never settles — 8 distinct caps, oscillating 1036.8 ↔ 1190.4
+MHz sample after sample at 84–87 °C.
+
+**Two earlier retractions worth keeping visible**, because they bound what may be
+claimed: the "chronic 10 kHz tsens storm" was an artifact of my own zone
+disable/enable, and "interrupt-storm latency causes the sdhci timeouts" was refuted
+(clock gating ruled out by `pm_runtime_get_sync` in `mmc_claim_host`; a 5 s timeout
+is not a latency artifact; the onset correlation was over-read).
+
+**Revised method for the reproduction (supersedes the spot-check in task #25):**
+sample IRQ 55 every second for the entire duration of a load run held at the trip,
+log per-second deltas, and only then compare against a build with the `VER_0_1`
+single-sensor constraint applied. `EXP-D` — a vanilla no-DVFS build on the DUT —
+remains the missing control for every "did our work cause it" question.
