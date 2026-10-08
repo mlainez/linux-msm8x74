@@ -767,6 +767,21 @@ static int tsens_set_trips(struct thermal_zone_device *tz, int low, int high)
 	dev_dbg(dev, "[%u] %s: proposed thresholds: (%d:%d)\n",
 		hw_id, __func__, low, high);
 
+	/*
+	 * The core proposes low == high when the zone temperature sits exactly
+	 * on a trip threshold, expecting an interrupt as soon as the temperature
+	 * moves off it. ADC-based sensors report whole degrees but compare raw
+	 * codes, several per degree, so a [T, T] window is violated by the very
+	 * reading it was built around: the level-triggered uplow interrupt then
+	 * fires continuously, and the core keeps proposing the same window. Arm
+	 * the neighbouring degrees instead, which still interrupts as soon as
+	 * the reported temperature leaves T.
+	 */
+	if (priv->feat->adc && low == high) {
+		low -= 1000;
+		high += 1000;
+	}
+
 	cl_high = clamp_val(high, priv->feat->trip_min_temp, priv->feat->trip_max_temp);
 	cl_low  = clamp_val(low, priv->feat->trip_min_temp, priv->feat->trip_max_temp);
 
