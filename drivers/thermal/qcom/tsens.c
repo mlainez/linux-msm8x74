@@ -504,6 +504,24 @@ static void tsens_set_interrupt(struct tsens_priv *priv, u32 hw_id,
 		tsens_set_interrupt_v1(priv, hw_id, irq_type, enable);
 }
 
+/*
+ * Re-arm the uplow interrupts of a sensor, dropping a violation it latched.
+ * Before v2, the upper and lower status bits stay set once a threshold was
+ * crossed, even after new thresholds are written or the temperature came
+ * back: only setting the clear bits drops them, and enabling the interrupt
+ * again releases the clear. A violation that still holds latches again at
+ * the next conversion.
+ */
+static void tsens_ack_uplow(struct tsens_priv *priv, u32 hw_id)
+{
+	if (tsens_version(priv) <= VER_1_X) {
+		tsens_set_interrupt(priv, hw_id, LOWER, false);
+		tsens_set_interrupt(priv, hw_id, UPPER, false);
+	}
+	tsens_set_interrupt(priv, hw_id, LOWER, true);
+	tsens_set_interrupt(priv, hw_id, UPPER, true);
+}
+
 /**
  * tsens_threshold_violated - Check if a sensor temperature violated a preset threshold
  * @priv: Pointer to tsens controller private data
@@ -700,6 +718,7 @@ static irqreturn_t tsens_irq_thread(int irq, void *data)
 {
 	struct tsens_priv *priv = data;
 	struct tsens_irq_data d;
+	unsigned long flags;
 	int i;
 
 	for (i = 0; i < priv->num_sensors; i++) {
@@ -712,6 +731,14 @@ static irqreturn_t tsens_irq_thread(int irq, void *data)
 			continue;
 
 		thermal_zone_device_update(s->tzd, THERMAL_EVENT_UNSPECIFIED);
+
+		/*
+		 * The core only writes new thresholds when the window changes;
+		 * acknowledge the violation it has now seen in any case.
+		 */
+		spin_lock_irqsave(&priv->ul_lock, flags);
+		tsens_ack_uplow(priv, hw_id);
+		spin_unlock_irqrestore(&priv->ul_lock, flags);
 
 		if (tsens_version(priv) < VER_0_1) {
 			/* Constraint: There is only 1 interrupt control register for all
@@ -795,8 +822,7 @@ static int tsens_set_trips(struct thermal_zone_device *tz, int low, int high)
 	/* Write the new thresholds and clear the status */
 	regmap_field_write(priv->rf[LOW_THRESH_0 + hw_id], low_val);
 	regmap_field_write(priv->rf[UP_THRESH_0 + hw_id], high_val);
-	tsens_set_interrupt(priv, hw_id, LOWER, true);
-	tsens_set_interrupt(priv, hw_id, UPPER, true);
+	tsens_ack_uplow(priv, hw_id);
 
 	spin_unlock_irqrestore(&priv->ul_lock, flags);
 
