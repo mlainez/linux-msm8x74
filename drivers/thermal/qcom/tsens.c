@@ -774,6 +774,48 @@ static irqreturn_t tsens_combined_irq_thread(int irq, void *data)
 	return tsens_irq_thread(irq, data);
 }
 
+/*
+ * ADC-based sensors compare raw codes, about three per degree on MSM8974,
+ * while get_temp rounds the code to the nearest degree. A threshold code
+ * taken from degc_to_code() is rounded down, so the comparator can trip at a
+ * code that still reads below the threshold: the core then sees no crossing,
+ * keeps the window, and the level-triggered uplow interrupt never deasserts.
+ * Pick the threshold codes from the readings instead, so that a violation
+ * always means the reported temperature has left the window: up at the first
+ * code reading at least @mC, low at the last code reading below @mC. The
+ * core counts a rise at temperature >= high and a fall at temperature < low.
+ */
+static int tsens_mC_to_degc_ceil(int mC)
+{
+	return mC / 1000 + (mC % 1000 > 0);
+}
+
+static u32 tsens_adc_up_code(const struct tsens_sensor *s, int mC)
+{
+	int degc = tsens_mC_to_degc_ceil(mC);
+	u32 code = degc_to_code(degc, s);
+
+	while (code > THRESHOLD_MIN_ADC_CODE && code_to_degc(code - 1, s) >= degc)
+		code--;
+	while (code < THRESHOLD_MAX_ADC_CODE && code_to_degc(code, s) < degc)
+		code++;
+
+	return code;
+}
+
+static u32 tsens_adc_low_code(const struct tsens_sensor *s, int mC)
+{
+	int degc = tsens_mC_to_degc_ceil(mC);
+	u32 code = degc_to_code(degc, s);
+
+	while (code > THRESHOLD_MIN_ADC_CODE && code_to_degc(code, s) >= degc)
+		code--;
+	while (code < THRESHOLD_MAX_ADC_CODE && code_to_degc(code + 1, s) < degc)
+		code++;
+
+	return code;
+}
+
 static int tsens_set_trips(struct thermal_zone_device *tz, int low, int high)
 {
 	struct tsens_sensor *s = thermal_zone_device_priv(tz);
@@ -795,25 +837,23 @@ static int tsens_set_trips(struct thermal_zone_device *tz, int low, int high)
 		hw_id, __func__, low, high);
 
 	/*
-	 * The core proposes low == high when the zone temperature sits exactly
-	 * on a trip threshold, expecting an interrupt as soon as the temperature
-	 * moves off it. ADC-based sensors report whole degrees but compare raw
-	 * codes, several per degree, so a [T, T] window is violated by the very
-	 * reading it was built around: the level-triggered uplow interrupt then
-	 * fires continuously, and the core keeps proposing the same window. Arm
-	 * the neighbouring degrees instead, which still interrupts as soon as
-	 * the reported temperature leaves T.
+	 * When the zone temperature sits on a trip threshold the core proposes
+	 * low == high, expecting an interrupt as soon as the temperature moves
+	 * off it: arm one degree above for the rise.
 	 */
-	if (priv->feat->adc && low == high) {
-		low -= 1000;
+	if (priv->feat->adc && low == high)
 		high += 1000;
-	}
 
 	cl_high = clamp_val(high, priv->feat->trip_min_temp, priv->feat->trip_max_temp);
 	cl_low  = clamp_val(low, priv->feat->trip_min_temp, priv->feat->trip_max_temp);
 
-	high_val = tsens_mC_to_hw(s, cl_high);
-	low_val  = tsens_mC_to_hw(s, cl_low);
+	if (priv->feat->adc) {
+		high_val = tsens_adc_up_code(s, cl_high);
+		low_val  = tsens_adc_low_code(s, cl_low);
+	} else {
+		high_val = tsens_mC_to_hw(s, cl_high);
+		low_val  = tsens_mC_to_hw(s, cl_low);
+	}
 
 	spin_lock_irqsave(&priv->ul_lock, flags);
 
