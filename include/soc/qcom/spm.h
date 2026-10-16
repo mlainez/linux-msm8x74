@@ -18,5 +18,9 @@ enum pm_sleep_mode {
 struct spm_driver_data;
 void spm_set_low_power_mode(struct spm_driver_data *drv,
 			    enum pm_sleep_mode mode);
+bool spm_spc_begin(void);
+void spm_spc_end(void);
+bool spm_spc_defer(void);
+void spm_spc_undefer(void);
 
 #endif /* __SPM_H__ */
