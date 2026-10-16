@@ -7,6 +7,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/cpufreq.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/delay.h>
@@ -399,6 +400,116 @@ void spm_set_low_power_mode(struct spm_driver_data *drv,
 	spm_register_write_sync(drv, SPM_REG_SPM_CTL, ctl_val);
 }
 
+/*
+ * Per-core power collapse must not overlap a Krait frequency transition: a
+ * core running its SPM collapse or restore sequence while the L2 SAW2 hands
+ * a new setpoint to the PMIC, or while a Krait clock is switched, leaves the
+ * shared rail in an undefined state and the SoC resets through PS_HOLD.  A
+ * core counts itself in spm_spc_active for the whole collapse, entry to exit.
+ * Each transition, and each gang-rail write, counts itself in
+ * spm_spc_blockers, wakes the idle cores and waits for spm_spc_active to
+ * drain; no collapse starts while spm_spc_blockers is nonzero.
+ */
+static atomic_t spm_spc_active = ATOMIC_INIT(0);
+static atomic_t spm_spc_blockers = ATOMIC_INIT(0);
+static atomic_t spm_spc_deferred = ATOMIC_INIT(0);
+
+/**
+ * spm_spc_begin() - claim a per-core power collapse
+ *
+ * Return: true if the caller may collapse and must call spm_spc_end() once it
+ * is back; false while a rail write is pending, in which case the caller must
+ * not collapse.
+ */
+bool spm_spc_begin(void)
+{
+	atomic_inc(&spm_spc_active);
+	smp_mb__after_atomic();
+	if (!atomic_read(&spm_spc_blockers))
+		return true;
+	atomic_dec(&spm_spc_active);
+	return false;
+}
+EXPORT_SYMBOL_GPL(spm_spc_begin);
+
+void spm_spc_end(void)
+{
+	smp_mb__before_atomic();
+	atomic_dec(&spm_spc_active);
+}
+EXPORT_SYMBOL_GPL(spm_spc_end);
+
+/**
+ * spm_spc_defer() - announce a core idling in WFI instead of collapsing
+ *
+ * The last blocker to leave wakes the deferred cores, so that they can
+ * collapse for the rest of their sleep instead of staying in WFI.
+ *
+ * Return: true if collapse is still blocked and the caller may idle in WFI;
+ * false if it has just been unblocked.  Either way the caller must call
+ * spm_spc_undefer() afterwards.
+ */
+bool spm_spc_defer(void)
+{
+	atomic_inc(&spm_spc_deferred);
+	smp_mb__after_atomic();
+	return atomic_read(&spm_spc_blockers);
+}
+EXPORT_SYMBOL_GPL(spm_spc_defer);
+
+void spm_spc_undefer(void)
+{
+	atomic_dec(&spm_spc_deferred);
+}
+EXPORT_SYMBOL_GPL(spm_spc_undefer);
+
+static unsigned int spm_spc_waits, spm_spc_timeouts;
+
+/*
+ * Block per-core power collapse and wait until no core is inside one.  On a
+ * timeout collapse stays blocked; the caller still has to unblock.
+ */
+static int spm_spc_block(void)
+{
+	int active;
+
+	atomic_inc(&spm_spc_blockers);
+	smp_mb__after_atomic();
+	if (!atomic_read(&spm_spc_active))
+		return 0;
+
+	spm_spc_waits++;
+	wake_up_all_idle_cpus();
+	if (read_poll_timeout(atomic_read, active, !active, 10, 20000, false,
+			      &spm_spc_active)) {
+		spm_spc_timeouts++;
+		return -EBUSY;
+	}
+	return 0;
+}
+
+static void spm_spc_unblock(void)
+{
+	smp_mb__before_atomic();
+	if (atomic_dec_and_test(&spm_spc_blockers) &&
+	    atomic_read(&spm_spc_deferred))
+		wake_up_all_idle_cpus();
+}
+
+static int spm_cpufreq_notify(struct notifier_block *nb, unsigned long event,
+			      void *data)
+{
+	if (event == CPUFREQ_PRECHANGE)
+		spm_spc_block();
+	else if (event == CPUFREQ_POSTCHANGE)
+		spm_spc_unblock();
+	return NOTIFY_OK;
+}
+
+static struct notifier_block spm_cpufreq_nb = {
+	.notifier_call = spm_cpufreq_notify,
+};
+
 static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
@@ -427,9 +538,14 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 	 * context it guarantees that this driver lacked.  IRQs are deliberately
 	 * left enabled - the vendor's apcs-master path does not disable them.
 	 */
+	if (spm_spc_block()) {
+		spm_spc_unblock();
+		return -EBUSY;
+	}
 	preempt_disable();
 	drv->reg_data->set_vdd(drv);
 	preempt_enable();
+	spm_spc_unblock();
 
 	/*
 	 * Propagate a failed rail write.  Without this the OPP core sees
@@ -447,6 +563,8 @@ static int spm_stats_show(struct seq_file *s, void *data)
 
 	seq_printf(s, "vdd_writes   %u\n", drv->vdd_writes);
 	seq_printf(s, "vdd_timeouts %u\n", drv->vdd_timeouts);
+	seq_printf(s, "spc_waits    %u\n", spm_spc_waits);
+	seq_printf(s, "spc_timeouts %u\n", spm_spc_timeouts);
 	seq_printf(s, "volt_sel     %u (confirmed)\n", drv->volt_sel);
 	seq_printf(s, "volt_sel_req %u (last requested)\n", drv->volt_sel_req);
 	return 0;
@@ -718,6 +836,10 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		dev_err(dev, "failed to register regulator\n");
 		return PTR_ERR(rdev);
 	}
+
+	if (drv->reg_data == &spm_reg_8974_8084_l2)
+		return cpufreq_register_notifier(&spm_cpufreq_nb,
+						 CPUFREQ_TRANSITION_NOTIFIER);
 
 	return 0;
 }
