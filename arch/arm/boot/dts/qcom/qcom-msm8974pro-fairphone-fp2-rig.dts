@@ -117,11 +117,20 @@
 	};
 };
 
+/*
+ * In host mode the carrier feeds VPH at the battery terminals, so the whole
+ * board's current flows through the IADC's internal sense resistor.
+ */
+&pm8941_iadc {
+	#io-channel-cells = <1>;
+};
+
 / {
 	supply-monitor {
 		compatible = "qcom,pm8941-supply-monitor";
-		io-channels = <&pm8941_vadc VADC_VSYS>, <&pm8941_vadc VADC_USBIN>;
-		io-channel-names = "vph", "usbin";
+		io-channels = <&pm8941_vadc VADC_VSYS>, <&pm8941_vadc VADC_USBIN>,
+			      <&pm8941_iadc 0>;
+		io-channel-names = "vph", "usbin", "ibat";
 		memory-region = <&supply_log>;
 		qcom,charger = <&smbb>;
 	};
