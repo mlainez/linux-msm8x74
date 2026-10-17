@@ -2,7 +2,8 @@
 /*
  * Supply monitor for Qualcomm PM8941 based boards
  *
- * Samples the system rail (VPH_PWR) and the USB input through the PMIC ADC,
+ * Samples the system rail (VPH_PWR), the USB input and, when the board is fed
+ * at the battery terminals, the current it draws there through the PMIC ADCs,
  * the real time status of the SMBB charger, the CPU frequencies and the
  * hottest CPU zone at a fixed rate, into a ring in reserved RAM. A warm reset
  * (PS_HOLD, watchdog) keeps that RAM: the next boot reports the last samples
@@ -80,7 +81,7 @@ struct supply_sample {
 	u16 mhz[NR_CPUS_LOGGED];
 	s8 max_temp;		/* hottest CPU zone, degC */
 	u8 flags;
-	u16 reserved;
+	s16 ibat_ma;		/* drawn from the battery terminals, 0 if unknown */
 };
 
 struct supply_log {
@@ -101,6 +102,7 @@ struct supply_mon {
 	u32 chg_base;
 	struct iio_channel *vph;
 	struct iio_channel *usbin;
+	struct iio_channel *ibat;
 	struct thermal_zone_device *zones[NR_ZONES];
 	struct supply_log *log;
 	struct supply_log *prev;	/* copy of the previous boot's log */
@@ -193,7 +195,7 @@ static int supply_mon_read_mv(struct iio_channel *chan, u16 *mv)
 static void supply_mon_sample(struct supply_mon *sm, struct supply_sample *s)
 {
 	unsigned int val;
-	int i, temp;
+	int i, temp, val_ma;
 
 	memset(s, 0, sizeof(*s));
 	s->seq = ++sm->seq;
@@ -202,6 +204,9 @@ static void supply_mon_sample(struct supply_mon *sm, struct supply_sample *s)
 	if (supply_mon_read_mv(sm->vph, &s->vph_mv))
 		s->flags |= FLAG_VPH_ERR;
 	supply_mon_read_mv(sm->usbin, &s->usbin_mv);
+	/* The IADC reads current drawn from the terminals as negative */
+	if (sm->ibat && !iio_read_channel_processed(sm->ibat, &val_ma))
+		s->ibat_ma = clamp(-val_ma, S16_MIN, S16_MAX);
 
 	if (sm->regmap) {
 		if (!regmap_read(sm->regmap, sm->chg_base + SMBB_CHG_RT_STS, &val))
@@ -265,8 +270,8 @@ again:
 
 static void supply_mon_print(struct seq_file *m, const struct supply_sample *s)
 {
-	seq_printf(m, "%10u %8u.%03u %5u %5u %02x %02x %02x %02x %4u/%4u/%4u/%4u %4d %s%s\n",
-		   s->seq, s->ms / 1000, s->ms % 1000, s->vph_mv, s->usbin_mv,
+	seq_printf(m, "%10u %8u.%03u %5u %5u %5d %02x %02x %02x %02x %4u/%4u/%4u/%4u %4d %s%s\n",
+		   s->seq, s->ms / 1000, s->ms % 1000, s->vph_mv, s->usbin_mv, s->ibat_ma,
 		   s->chg_rt, s->bat_rt, s->usb_rt, s->dc_rt,
 		   s->mhz[0], s->mhz[1], s->mhz[2], s->mhz[3], s->max_temp,
 		   s->flags & FLAG_CAPPED ? "capped " : "",
@@ -274,7 +279,7 @@ static void supply_mon_print(struct seq_file *m, const struct supply_sample *s)
 }
 
 static const char supply_mon_header[] =
-	"       seq        time   vph usbin chg bat usb dc  cpu0-3 MHz          temp flags\n";
+	"       seq        time   vph usbin  ibat chg bat usb dc  cpu0-3 MHz          temp flags\n";
 
 static int supply_mon_previous_show(struct seq_file *m, void *data)
 {
@@ -343,8 +348,8 @@ static void supply_mon_init_log(struct supply_mon *sm)
 		for (i = 0; i < min(n, 5u); i++) {
 			struct supply_sample *s = &p->samples[(first + i) % p->nr_samples];
 
-			dev_info(sm->dev, "  t=%u.%03u s vph=%u mV usbin=%u mV rt=%02x/%02x/%02x/%02x %u/%u/%u/%u MHz %d C%s\n",
-				 s->ms / 1000, s->ms % 1000, s->vph_mv, s->usbin_mv,
+			dev_info(sm->dev, "  t=%u.%03u s vph=%u mV usbin=%u mV ibat=%d mA rt=%02x/%02x/%02x/%02x %u/%u/%u/%u MHz %d C%s\n",
+				 s->ms / 1000, s->ms % 1000, s->vph_mv, s->usbin_mv, s->ibat_ma,
 				 s->chg_rt, s->bat_rt, s->usb_rt, s->dc_rt,
 				 s->mhz[0], s->mhz[1], s->mhz[2], s->mhz[3],
 				 s->max_temp, s->flags & FLAG_CAPPED ? " capped" : "");
@@ -372,6 +377,12 @@ static int supply_mon_probe(struct platform_device *pdev)
 		if (PTR_ERR(sm->usbin) == -EPROBE_DEFER)
 			return -EPROBE_DEFER;
 		sm->usbin = NULL;
+	}
+	sm->ibat = devm_iio_channel_get(dev, "ibat");
+	if (IS_ERR(sm->ibat)) {
+		if (PTR_ERR(sm->ibat) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		sm->ibat = NULL;
 	}
 
 	/* The charger status registers, through the PMIC regmap */
