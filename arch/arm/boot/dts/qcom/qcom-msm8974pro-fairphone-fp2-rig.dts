@@ -180,3 +180,15 @@
 	qcom,minimum-input-voltage = <4300000>;
 };
 
+
+/* Power-collapse and transition breadcrumbs, kept across a warm reset */
+&reserved_memory {
+	spm_trace: spm-trace@67f38000 {
+		reg = <0x67f38000 0x38000>;
+		no-map;
+	};
+};
+
+&saw_l2 {
+	memory-region = <&spm_trace>;
+};
