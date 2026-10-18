@@ -62,8 +62,22 @@ static __cpuidle int spm_enter_idle_state(struct cpuidle_device *dev,
 {
 	struct cpuidle_qcom_spm_data *data = container_of(drv, struct cpuidle_qcom_spm_data,
 							  cpuidle_driver);
+	int ret;
 
-	return CPU_PM_CPU_IDLE_ENTER_PARAM(qcom_cpu_spc, idx, data->spm);
+	if (!idx)
+		return CPU_PM_CPU_IDLE_ENTER_PARAM(qcom_cpu_spc, idx, data->spm);
+
+	/* A Krait frequency transition is running: idle in WFI meanwhile */
+	if (!spm_spc_begin()) {
+		if (spm_spc_defer())
+			cpu_do_idle();
+		spm_spc_undefer();
+		return 0;
+	}
+	ret = CPU_PM_CPU_IDLE_ENTER_PARAM(qcom_cpu_spc, idx, data->spm);
+	spm_spc_end();
+
+	return ret;
 }
 
 static struct cpuidle_driver qcom_spm_idle_driver = {

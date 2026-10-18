@@ -118,17 +118,9 @@
 
 		idle-states {
 			/*
-			 * Deep per-core power-collapse is DISABLED (WFI-only idle)
-			 * as the interim fix for the DVFS-transition silent PS_HOLD
-			 * reset: a core running the SPM power-collapse sequence
-			 * concurrently with an L2 gang-rail voltage write corrupts
-			 * the shared SAW/rail.  Even with the write made
-			 * preemption-safe, another core collapsing during the write
-			 * still triggers it, so free DVFS needs cpu-spc off here.
-			 * Tradeoff: higher idle power (cores clock-gate at WFI, do
-			 * not power-collapse).  The power-optimal fix is to
-			 * coordinate collapse against the gang-rail write instead of
-			 * disabling it - tracked as the last DVFS item.
+			 * A core collapsing during a Krait frequency transition
+			 * resets the SoC through PS_HOLD; the SPM driver keeps the
+			 * two apart (spm_spc_begin() and the cpufreq notifier).
 			 */
 			CPU_SPC: cpu-spc {
 				compatible = "qcom,idle-state-spc",
@@ -136,7 +128,6 @@
 				entry-latency-us = <150>;
 				exit-latency-us = <200>;
 				min-residency-us = <2000>;
-				status = "disabled";
 			};
 		};
 	};

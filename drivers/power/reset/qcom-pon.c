@@ -17,6 +17,8 @@
 #define PON_WARM_RESET_REASON2		0x0b
 #define PON_POFF_REASON1		0x0c
 #define PON_POFF_REASON2		0x0d
+#define PON_SOFT_RESET_REASON1		0x0e
+#define PON_SOFT_RESET_REASON2		0x0f
 #define PON_SOFT_RB_SPARE		0x8f
 
 #define GEN1_REASON_SHIFT		2
@@ -46,12 +48,23 @@ static const char * const poff_reasons[] = {
 	"OTST3 (overtemp)", "STAGE3 reset",
 };
 
+/*
+ * Warm and soft resets restart the SoC with the PMIC rails up. The causes
+ * use the layout of the power-off reasons on these PMICs.
+ */
+#define reset_reasons poff_reasons
+
 struct pm8916_pon {
 	struct device *dev;
 	struct regmap *regmap;
 	u32 baseaddr;
 	struct reboot_mode_driver reboot_mode;
 	long reason_shift;
+	/* Reasons latched at probe, for userspace post-mortems */
+	unsigned int pon_reason;
+	unsigned int warm_reset_reason;
+	unsigned int poff_reason;
+	unsigned int soft_reset_reason;
 };
 
 static int pm8916_reboot_mode_write(struct reboot_mode_driver *reboot,
@@ -95,38 +108,77 @@ static void pm8916_pon_log_bits(struct pm8916_pon *pon, const char *what,
  * kernel log at all - the PMIC just drops the SoC - so these registers are
  * the only post-mortem evidence available after a silent reset.
  */
+static int pm8916_pon_read16(struct pm8916_pon *pon, unsigned int reg1,
+			     unsigned int reg2, unsigned int *val)
+{
+	unsigned int lo, hi;
+	int ret;
+
+	ret = regmap_read(pon->regmap, pon->baseaddr + reg1, &lo);
+	if (!ret)
+		ret = regmap_read(pon->regmap, pon->baseaddr + reg2, &hi);
+	if (!ret)
+		*val = lo | hi << 8;
+
+	return ret;
+}
+
 static void pm8916_pon_report_reasons(struct pm8916_pon *pon)
 {
-	unsigned int pon_reason, warm1, warm2, poff1, poff2;
 	int ret;
 
 	ret = regmap_read(pon->regmap, pon->baseaddr + PON_REASON1,
-			  &pon_reason);
+			  &pon->pon_reason);
 	if (ret) {
 		dev_warn(pon->dev, "cannot read the power-on reason: %d\n",
 			 ret);
 		return;
 	}
-	if (regmap_read(pon->regmap, pon->baseaddr + PON_WARM_RESET_REASON1,
-			&warm1) ||
-	    regmap_read(pon->regmap, pon->baseaddr + PON_WARM_RESET_REASON2,
-			&warm2) ||
-	    regmap_read(pon->regmap, pon->baseaddr + PON_POFF_REASON1,
-			&poff1) ||
-	    regmap_read(pon->regmap, pon->baseaddr + PON_POFF_REASON2,
-			&poff2))
+	if (pm8916_pon_read16(pon, PON_WARM_RESET_REASON1,
+			      PON_WARM_RESET_REASON2, &pon->warm_reset_reason) ||
+	    pm8916_pon_read16(pon, PON_POFF_REASON1, PON_POFF_REASON2,
+			      &pon->poff_reason) ||
+	    pm8916_pon_read16(pon, PON_SOFT_RESET_REASON1,
+			      PON_SOFT_RESET_REASON2, &pon->soft_reset_reason))
 		return;
 
 	dev_info(pon->dev,
-		 "pon=0x%02x warm_reset=0x%02x%02x poff=0x%02x%02x\n",
-		 pon_reason, warm2, warm1, poff2, poff1);
+		 "pon=0x%02x warm_reset=0x%04x poff=0x%04x soft_reset=0x%04x\n",
+		 pon->pon_reason, pon->warm_reset_reason, pon->poff_reason,
+		 pon->soft_reset_reason);
 
-	pm8916_pon_log_bits(pon, "power-on", pon_reason, pon_reasons,
+	pm8916_pon_log_bits(pon, "power-on", pon->pon_reason, pon_reasons,
 			  ARRAY_SIZE(pon_reasons));
-	pm8916_pon_log_bits(pon, "previous power-off",
-			  poff1 | (poff2 << 8), poff_reasons,
-			  ARRAY_SIZE(poff_reasons));
+	pm8916_pon_log_bits(pon, "previous power-off", pon->poff_reason,
+			  poff_reasons, ARRAY_SIZE(poff_reasons));
+	if (pon->warm_reset_reason)
+		pm8916_pon_log_bits(pon, "warm reset", pon->warm_reset_reason,
+				  reset_reasons, ARRAY_SIZE(reset_reasons));
+	if (pon->soft_reset_reason)
+		pm8916_pon_log_bits(pon, "soft reset", pon->soft_reset_reason,
+				  reset_reasons, ARRAY_SIZE(reset_reasons));
 }
+
+static ssize_t pm8916_pon_reasons_show(struct device *dev,
+				       struct device_attribute *attr, char *buf)
+{
+	struct pm8916_pon *pon = dev_get_drvdata(dev);
+
+	return sysfs_emit(buf,
+			  "pon=0x%02x warm_reset=0x%04x poff=0x%04x soft_reset=0x%04x\n",
+			  pon->pon_reason, pon->warm_reset_reason,
+			  pon->poff_reason, pon->soft_reset_reason);
+}
+static DEVICE_ATTR(reasons, 0444, pm8916_pon_reasons_show, NULL);
+
+static struct attribute *pm8916_pon_attrs[] = {
+	&dev_attr_reasons.attr,
+	NULL
+};
+
+static const struct attribute_group pm8916_pon_group = {
+	.attrs = pm8916_pon_attrs,
+};
 
 static int pm8916_pon_probe(struct platform_device *pdev)
 {
@@ -167,6 +219,10 @@ static int pm8916_pon_probe(struct platform_device *pdev)
 	}
 
 	platform_set_drvdata(pdev, pon);
+
+	error = devm_device_add_group(&pdev->dev, &pm8916_pon_group);
+	if (error)
+		dev_warn(&pdev->dev, "cannot expose the reasons: %d\n", error);
 
 	return devm_of_platform_populate(&pdev->dev);
 }

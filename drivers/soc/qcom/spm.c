@@ -7,6 +7,7 @@
  */
 
 #include <linux/bitfield.h>
+#include <linux/cpufreq.h>
 #include <linux/debugfs.h>
 #include <linux/seq_file.h>
 #include <linux/delay.h>
@@ -18,6 +19,8 @@
 #include <linux/linear_range.h>
 #include <linux/module.h>
 #include <linux/of.h>
+#include <linux/of_reserved_mem.h>
+#include <linux/sched/clock.h>
 #include <linux/platform_device.h>
 #include <linux/slab.h>
 #include <linux/smp.h>
@@ -399,6 +402,261 @@ void spm_set_low_power_mode(struct spm_driver_data *drv,
 	spm_register_write_sync(drv, SPM_REG_SPM_CTL, ctl_val);
 }
 
+/*
+ * Per-core power collapse must not overlap a Krait frequency transition: a
+ * core running its SPM collapse or restore sequence while the L2 SAW2 hands
+ * a new setpoint to the PMIC, or while a Krait clock is switched, leaves the
+ * shared rail in an undefined state and the SoC resets through PS_HOLD.  A
+ * core counts itself in spm_spc_active for the whole collapse, entry to exit.
+ * Each transition, and each gang-rail write, counts itself in
+ * spm_spc_blockers, wakes the idle cores and waits for spm_spc_active to
+ * drain; no collapse starts while spm_spc_blockers is nonzero.
+ */
+static atomic_t spm_spc_active = ATOMIC_INIT(0);
+static atomic_t spm_spc_blockers = ATOMIC_INIT(0);
+static atomic_t spm_spc_deferred = ATOMIC_INIT(0);
+
+/*
+ * Breadcrumbs of collapse and transition events, in a reserved RAM region
+ * that a warm reset keeps, so that the boot after a PS_HOLD reset shows what
+ * each core was doing just before it.
+ */
+enum {
+	SPM_EV_CLAIM = 1,	/* arg: cores now inside a collapse */
+	SPM_EV_DENIED,		/* arg: blockers */
+	SPM_EV_BACK,
+	SPM_EV_BLOCK,		/* arg: cores inside a collapse */
+	SPM_EV_DRAINED,		/* arg: wait in us */
+	SPM_EV_UNBLOCK,		/* arg: blockers left */
+	SPM_EV_FREQ_PRE,	/* arg: new MHz */
+	SPM_EV_FREQ_POST,	/* arg: new MHz */
+	SPM_EV_VDD_BEGIN,	/* arg: selector */
+	SPM_EV_VDD_END,		/* arg: selector */
+	SPM_EV_NR,
+};
+
+static const char *const spm_ev_names[SPM_EV_NR] = {
+	[SPM_EV_CLAIM] = "claim", [SPM_EV_DENIED] = "denied",
+	[SPM_EV_BACK] = "back", [SPM_EV_BLOCK] = "block",
+	[SPM_EV_DRAINED] = "drained", [SPM_EV_UNBLOCK] = "unblock",
+	[SPM_EV_FREQ_PRE] = "freq-pre", [SPM_EV_FREQ_POST] = "freq-post",
+	[SPM_EV_VDD_BEGIN] = "vdd-begin", [SPM_EV_VDD_END] = "vdd-end",
+};
+
+struct spm_trace_ev {
+	u32 us;
+	u8 cpu;
+	u8 ev;
+	u16 arg;
+};
+
+#define SPM_TRACE_MAGIC	0x53504354	/* "SPCT" */
+
+struct spm_trace_log {
+	u32 magic;
+	u32 nr;
+	atomic_t head;
+	u32 reserved;
+	struct spm_trace_ev ev[];
+};
+
+static struct spm_trace_log *spm_tlog;
+static struct spm_trace_ev *spm_tprev;
+static u32 spm_tprev_nr;
+
+static void spm_trace(u8 ev, unsigned int arg)
+{
+	struct spm_trace_log *l = READ_ONCE(spm_tlog);
+	struct spm_trace_ev *e;
+
+	if (!l)
+		return;
+	e = &l->ev[(u32)atomic_inc_return(&l->head) % l->nr];
+	e->us = local_clock() >> 10;
+	e->cpu = raw_smp_processor_id();
+	e->ev = ev;
+	e->arg = min(arg, 0xffffu);
+}
+
+static void spm_trace_show_ev(struct seq_file *s, const struct spm_trace_ev *e)
+{
+	seq_printf(s, "%10u cpu%u %-9s %u\n", e->us, e->cpu,
+		   e->ev < SPM_EV_NR && spm_ev_names[e->ev] ? spm_ev_names[e->ev] : "?",
+		   e->arg);
+}
+
+static int spm_trace_previous_show(struct seq_file *s, void *data)
+{
+	u32 i;
+
+	for (i = 0; i < spm_tprev_nr; i++)
+		if (spm_tprev[i].ev)
+			spm_trace_show_ev(s, &spm_tprev[i]);
+	return 0;
+}
+DEFINE_SHOW_ATTRIBUTE(spm_trace_previous);
+
+/*
+ * Map the breadcrumb region, keep what the previous boot left in it in
+ * order, print its last events and start a new ring.
+ */
+static void spm_trace_init(struct device *dev)
+{
+	struct device_node *np = of_parse_phandle(dev->of_node, "memory-region", 0);
+	struct reserved_mem *rmem;
+	struct spm_trace_log *l;
+	u32 nr, head, i;
+
+	if (!np)
+		return;
+	rmem = of_reserved_mem_lookup(np);
+	of_node_put(np);
+	if (!rmem)
+		return;
+	l = devm_memremap(dev, rmem->base, rmem->size, MEMREMAP_WC);
+	if (IS_ERR(l))
+		return;
+	nr = (rmem->size - sizeof(*l)) / sizeof(l->ev[0]);
+
+	if (l->magic == SPM_TRACE_MAGIC && l->nr == nr) {
+		spm_tprev = devm_kcalloc(dev, nr, sizeof(*spm_tprev), GFP_KERNEL);
+		if (spm_tprev) {
+			head = (u32)atomic_read(&l->head) + 1;
+			for (i = 0; i < nr; i++)
+				spm_tprev[i] = l->ev[(head + i) % nr];
+			spm_tprev_nr = nr;
+			dev_info(dev, "previous boot's last collapse and transition events:\n");
+			for (i = nr - min(nr, 24u); i < nr; i++) {
+				struct spm_trace_ev *e = &spm_tprev[i];
+
+				if (e->ev)
+					dev_info(dev, "  %10u us cpu%u %s %u\n", e->us, e->cpu,
+						 e->ev < SPM_EV_NR && spm_ev_names[e->ev] ?
+						 spm_ev_names[e->ev] : "?", e->arg);
+			}
+		}
+	}
+
+	memset(l, 0, rmem->size);
+	l->magic = SPM_TRACE_MAGIC;
+	l->nr = nr;
+	WRITE_ONCE(spm_tlog, l);
+}
+
+/**
+ * spm_spc_begin() - claim a per-core power collapse
+ *
+ * Return: true if the caller may collapse and must call spm_spc_end() once it
+ * is back; false while a rail write is pending, in which case the caller must
+ * not collapse.
+ */
+bool spm_spc_begin(void)
+{
+	atomic_inc(&spm_spc_active);
+	smp_mb__after_atomic();
+	if (!atomic_read(&spm_spc_blockers)) {
+		spm_trace(SPM_EV_CLAIM, atomic_read(&spm_spc_active));
+		return true;
+	}
+	atomic_dec(&spm_spc_active);
+	spm_trace(SPM_EV_DENIED, atomic_read(&spm_spc_blockers));
+	return false;
+}
+EXPORT_SYMBOL_GPL(spm_spc_begin);
+
+void spm_spc_end(void)
+{
+	spm_trace(SPM_EV_BACK, 0);
+	smp_mb__before_atomic();
+	atomic_dec(&spm_spc_active);
+}
+EXPORT_SYMBOL_GPL(spm_spc_end);
+
+/**
+ * spm_spc_defer() - announce a core idling in WFI instead of collapsing
+ *
+ * The last blocker to leave wakes the deferred cores, so that they can
+ * collapse for the rest of their sleep instead of staying in WFI.
+ *
+ * Return: true if collapse is still blocked and the caller may idle in WFI;
+ * false if it has just been unblocked.  Either way the caller must call
+ * spm_spc_undefer() afterwards.
+ */
+bool spm_spc_defer(void)
+{
+	atomic_inc(&spm_spc_deferred);
+	smp_mb__after_atomic();
+	return atomic_read(&spm_spc_blockers);
+}
+EXPORT_SYMBOL_GPL(spm_spc_defer);
+
+void spm_spc_undefer(void)
+{
+	atomic_dec(&spm_spc_deferred);
+}
+EXPORT_SYMBOL_GPL(spm_spc_undefer);
+
+static unsigned int spm_spc_waits, spm_spc_timeouts;
+
+/*
+ * Block per-core power collapse and wait until no core is inside one.  On a
+ * timeout collapse stays blocked; the caller still has to unblock.
+ */
+static int spm_spc_block(void)
+{
+	int active;
+
+	u64 t0;
+
+	atomic_inc(&spm_spc_blockers);
+	smp_mb__after_atomic();
+	active = atomic_read(&spm_spc_active);
+	spm_trace(SPM_EV_BLOCK, active);
+	if (!active)
+		return 0;
+
+	spm_spc_waits++;
+	t0 = local_clock();
+	wake_up_all_idle_cpus();
+	if (read_poll_timeout(atomic_read, active, !active, 10, 20000, false,
+			      &spm_spc_active)) {
+		spm_spc_timeouts++;
+		return -EBUSY;
+	}
+	spm_trace(SPM_EV_DRAINED, div_u64(local_clock() - t0, 1000));
+	return 0;
+}
+
+static void spm_spc_unblock(void)
+{
+	bool last;
+
+	spm_trace(SPM_EV_UNBLOCK, atomic_read(&spm_spc_blockers) - 1);
+	smp_mb__before_atomic();
+	last = atomic_dec_and_test(&spm_spc_blockers);
+	if (last && atomic_read(&spm_spc_deferred))
+		wake_up_all_idle_cpus();
+}
+
+static int spm_cpufreq_notify(struct notifier_block *nb, unsigned long event,
+			      void *data)
+{
+	struct cpufreq_freqs *freqs = data;
+
+	if (event == CPUFREQ_PRECHANGE) {
+		spm_trace(SPM_EV_FREQ_PRE, freqs->new / 1000);
+		spm_spc_block();
+	} else if (event == CPUFREQ_POSTCHANGE) {
+		spm_spc_unblock();
+		spm_trace(SPM_EV_FREQ_POST, freqs->new / 1000);
+	}
+	return NOTIFY_OK;
+}
+
+static struct notifier_block spm_cpufreq_nb = {
+	.notifier_call = spm_cpufreq_notify,
+};
+
 static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
@@ -427,9 +685,16 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 	 * context it guarantees that this driver lacked.  IRQs are deliberately
 	 * left enabled - the vendor's apcs-master path does not disable them.
 	 */
+	if (spm_spc_block()) {
+		spm_spc_unblock();
+		return -EBUSY;
+	}
 	preempt_disable();
+	spm_trace(SPM_EV_VDD_BEGIN, selector);
 	drv->reg_data->set_vdd(drv);
+	spm_trace(SPM_EV_VDD_END, selector);
 	preempt_enable();
+	spm_spc_unblock();
 
 	/*
 	 * Propagate a failed rail write.  Without this the OPP core sees
@@ -447,6 +712,8 @@ static int spm_stats_show(struct seq_file *s, void *data)
 
 	seq_printf(s, "vdd_writes   %u\n", drv->vdd_writes);
 	seq_printf(s, "vdd_timeouts %u\n", drv->vdd_timeouts);
+	seq_printf(s, "spc_waits    %u\n", spm_spc_waits);
+	seq_printf(s, "spc_timeouts %u\n", spm_spc_timeouts);
 	seq_printf(s, "volt_sel     %u (confirmed)\n", drv->volt_sel);
 	seq_printf(s, "volt_sel_req %u (last requested)\n", drv->volt_sel_req);
 	return 0;
@@ -717,6 +984,15 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	if (IS_ERR(rdev)) {
 		dev_err(dev, "failed to register regulator\n");
 		return PTR_ERR(rdev);
+	}
+
+	if (drv->reg_data == &spm_reg_8974_8084_l2) {
+		spm_trace_init(dev);
+		if (spm_tprev && drv->debugfs)
+			debugfs_create_file("spc_previous", 0444, drv->debugfs, NULL,
+					    &spm_trace_previous_fops);
+		return cpufreq_register_notifier(&spm_cpufreq_nb,
+						 CPUFREQ_TRANSITION_NOTIFIER);
 	}
 
 	return 0;
