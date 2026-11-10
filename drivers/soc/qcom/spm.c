@@ -985,12 +985,6 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		dev_dbg(dev, "SAW2 L2 regulator (shared rail)\n");
 	}
 
-	if (IS_ENABLED(CONFIG_DEBUG_FS)) {
-		drv->debugfs = debugfs_create_dir(dev_name(dev), NULL);
-		debugfs_create_file("rail", 0444, drv->debugfs, drv,
-				    &spm_stats_fops);
-	}
-
 	ret = linear_range_get_selector_high(drv->reg_data->range,
 					     drv->reg_data->init_uV,
 					     &drv->volt_sel,
@@ -1005,19 +999,31 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	 * Program initial voltage to hardware so the SAW2 VCTL register
 	 * matches the value we report via get_voltage_sel.
 	 */
-	if (drv->reg_data->set_vdd) {
-		if (drv->reg_cpu >= 0)
-			smp_call_function_single(drv->reg_cpu,
-						 drv->reg_data->set_vdd,
-						 drv, true);
-		else
-			drv->reg_data->set_vdd(drv);
-	}
+	drv->set_vdd_ret = 0;
+	if (drv->reg_cpu >= 0)
+		smp_call_function_single(drv->reg_cpu, drv->reg_data->set_vdd,
+					 drv, true);
+	else
+		drv->reg_data->set_vdd(drv);
+	/*
+	 * Without a confirmed starting point the selector reported to the
+	 * regulator core would be a guess: leave the rail to the bootloader.
+	 */
+	if (drv->set_vdd_ret)
+		return dev_err_probe(dev, drv->set_vdd_ret,
+				     "failed to set the initial voltage\n");
 
 	rdev = devm_regulator_register(dev, rdesc, &config);
 	if (IS_ERR(rdev)) {
 		dev_err(dev, "failed to register regulator\n");
 		return PTR_ERR(rdev);
+	}
+
+	/* Only once nothing can fail any more: the files point at drv */
+	if (IS_ENABLED(CONFIG_DEBUG_FS)) {
+		drv->debugfs = debugfs_create_dir(dev_name(dev), NULL);
+		debugfs_create_file("rail", 0444, drv->debugfs, drv,
+				    &spm_stats_fops);
 	}
 
 	if (drv->reg_data == &spm_reg_8974_8084_l2) {
