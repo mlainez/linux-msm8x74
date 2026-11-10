@@ -514,7 +514,7 @@ static void spm_trace_init(struct device *dev)
 		return;
 	rmem = of_reserved_mem_lookup(np);
 	of_node_put(np);
-	if (!rmem)
+	if (!rmem || rmem->size < sizeof(*l) + sizeof(l->ev[0]))
 		return;
 	l = devm_memremap(dev, rmem->base, rmem->size, MEMREMAP_WC);
 	if (IS_ERR(l))
