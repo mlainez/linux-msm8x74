@@ -1361,8 +1361,20 @@ static int tsens_register(struct tsens_priv *priv)
 		tzd = devm_thermal_of_zone_register(priv->dev, priv->sensor[i].hw_id,
 						    &priv->sensor[i],
 						    &tsens_of_ops);
-		if (IS_ERR(tzd))
+		if (IS_ERR(tzd)) {
+			/*
+			 * tsens_irq_thread() skips a sensor without a zone, so
+			 * a violation it latched would hold the level-triggered
+			 * uplow interrupt asserted for good: keep it masked.
+			 */
+			if (tsens_version(priv) >= VER_0_1) {
+				u32 hw_id = priv->sensor[i].hw_id;
+
+				tsens_set_interrupt(priv, hw_id, LOWER, false);
+				tsens_set_interrupt(priv, hw_id, UPPER, false);
+			}
 			continue;
+		}
 		priv->sensor[i].tzd = tzd;
 		if (priv->ops->enable)
 			priv->ops->enable(priv, i);
