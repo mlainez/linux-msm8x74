@@ -433,6 +433,7 @@ enum {
 	SPM_EV_FREQ_POST,	/* arg: new MHz */
 	SPM_EV_VDD_BEGIN,	/* arg: selector */
 	SPM_EV_VDD_END,		/* arg: selector */
+	SPM_EV_STUCK,		/* arg: cores still inside a collapse */
 	SPM_EV_NR,
 };
 
@@ -442,6 +443,7 @@ static const char *const spm_ev_names[SPM_EV_NR] = {
 	[SPM_EV_DRAINED] = "drained", [SPM_EV_UNBLOCK] = "unblock",
 	[SPM_EV_FREQ_PRE] = "freq-pre", [SPM_EV_FREQ_POST] = "freq-post",
 	[SPM_EV_VDD_BEGIN] = "vdd-begin", [SPM_EV_VDD_END] = "vdd-end",
+	[SPM_EV_STUCK] = "stuck",
 };
 
 struct spm_trace_ev {
@@ -622,6 +624,7 @@ static int spm_spc_block(void)
 	if (read_poll_timeout(atomic_read, active, !active, 10, 20000, false,
 			      &spm_spc_active)) {
 		spm_spc_timeouts++;
+		spm_trace(SPM_EV_STUCK, active);
 		return -EBUSY;
 	}
 	spm_trace(SPM_EV_DRAINED, div_u64(local_clock() - t0, 1000));
@@ -646,7 +649,10 @@ static int spm_cpufreq_notify(struct notifier_block *nb, unsigned long event,
 
 	if (event == CPUFREQ_PRECHANGE) {
 		spm_trace(SPM_EV_FREQ_PRE, freqs->new / 1000);
-		spm_spc_block();
+		/* A notifier cannot stop the transition: leave evidence */
+		if (spm_spc_block())
+			pr_err_ratelimited("qcom_spm: cpu%u changes frequency with a core still in power collapse\n",
+					   freqs->policy->cpu);
 	} else if (event == CPUFREQ_POSTCHANGE) {
 		spm_spc_unblock();
 		spm_trace(SPM_EV_FREQ_POST, freqs->new / 1000);
