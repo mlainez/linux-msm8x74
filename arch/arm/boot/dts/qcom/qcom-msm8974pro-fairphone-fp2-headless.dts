@@ -34,3 +34,11 @@
 	compatible = "qcom,adreno-330.2", "qcom,adreno", "amd,imageon";
 	status = "okay";
 };
+
+/*
+ * No display stack on headless boards: probing the MDP SMMU with the
+ * MMSS bus un-arbitrated resets the SoC (see the node in the dtsi).
+ */
+&mdp_iommu {
+	status = "disabled";
+};

@@ -21,6 +21,100 @@ struct vadc_map_pt {
 	s32 y;
 };
 
+/*
+ * Battery thermistor, ratiometric against VDD_VADC.  Ported verbatim from
+ * the downstream qpnp-adc-common.c adcmap_btm_threshold[] table (converted
+ * from decidegC/mV to the mV/millidegC form used here).  This is the table
+ * the vendor driver selects for the batt_therm channel on PM8941 boards
+ * (qcom,scale-function = <1>, SCALE_BATT_THERM); the 100k pullup table used
+ * for other thermistors gives wrong readings for it.
+ */
+static const struct vadc_map_pt adcmap_batt_therm_qrd[] = {
+	{ 1719,  -30000 },
+	{ 1628,  -20000 },
+	{ 1506,  -10000 },
+	{ 1355,       0 },
+	{ 1339,    1000 },
+	{ 1322,    2000 },
+	{ 1305,    3000 },
+	{ 1288,    4000 },
+	{ 1271,    5000 },
+	{ 1253,    6000 },
+	{ 1236,    7000 },
+	{ 1218,    8000 },
+	{ 1200,    9000 },
+	{ 1182,   10000 },
+	{ 1165,   11000 },
+	{ 1146,   12000 },
+	{ 1128,   13000 },
+	{ 1110,   14000 },
+	{ 1092,   15000 },
+	{ 1074,   16000 },
+	{ 1056,   17000 },
+	{ 1038,   18000 },
+	{ 1019,   19000 },
+	{ 1001,   20000 },
+	{  983,   21000 },
+	{  965,   22000 },
+	{  947,   23000 },
+	{  930,   24000 },
+	{  912,   25000 },
+	{  894,   26000 },
+	{  877,   27000 },
+	{  860,   28000 },
+	{  843,   29000 },
+	{  825,   30000 },
+	{  809,   31000 },
+	{  792,   32000 },
+	{  776,   33000 },
+	{  759,   34000 },
+	{  743,   35000 },
+	{  727,   36000 },
+	{  712,   37000 },
+	{  696,   38000 },
+	{  681,   39000 },
+	{  666,   40000 },
+	{  651,   41000 },
+	{  637,   42000 },
+	{  622,   43000 },
+	{  608,   44000 },
+	{  595,   45000 },
+	{  581,   46000 },
+	{  568,   47000 },
+	{  555,   48000 },
+	{  542,   49000 },
+	{  529,   50000 },
+	{  517,   51000 },
+	{  505,   52000 },
+	{  493,   53000 },
+	{  481,   54000 },
+	{  470,   55000 },
+	{  459,   56000 },
+	{  448,   57000 },
+	{  437,   58000 },
+	{  427,   59000 },
+	{  417,   60000 },
+	{  406,   61000 },
+	{  397,   62000 },
+	{  387,   63000 },
+	{  378,   64000 },
+	{  369,   65000 },
+	{  360,   66000 },
+	{  351,   67000 },
+	{  343,   68000 },
+	{  335,   69000 },
+	{  326,   70000 },
+	{  319,   71000 },
+	{  311,   72000 },
+	{  303,   73000 },
+	{  296,   74000 },
+	{  289,   75000 },
+	{  282,   76000 },
+	{  275,   77000 },
+	{  269,   78000 },
+	{  262,   79000 },
+};
+
 /* Voltage to temperature */
 static const struct vadc_map_pt adcmap_100k_104ef_104fb[] = {
 	{1758,	-40000 },
@@ -443,6 +537,23 @@ static int qcom_vadc_scale_therm(const struct vadc_linear_graph *calib_graph,
 	return 0;
 }
 
+static int qcom_vadc_scale_batt_therm(const struct vadc_linear_graph *calib_graph,
+				      const struct u32_fract *prescale,
+				      bool absolute, u16 adc_code,
+				      int *result_mdec)
+{
+	s64 voltage = 0;
+
+	qcom_vadc_scale_calib(calib_graph, adc_code, absolute, &voltage);
+
+	if (absolute)
+		voltage = div64_s64(voltage, 1000);
+
+	return qcom_vadc_map_voltage_temp(adcmap_batt_therm_qrd,
+					  ARRAY_SIZE(adcmap_batt_therm_qrd),
+					  voltage, result_mdec);
+}
+
 static int qcom_vadc_scale_die_temp(const struct vadc_linear_graph *calib_graph,
 				    const struct u32_fract *prescale,
 				    bool absolute,
@@ -645,6 +756,10 @@ int qcom_vadc_scale(enum vadc_scale_fn_type scaletype,
 		return qcom_vadc_scale_volt(calib_graph, prescale,
 					    absolute, adc_code,
 					    result);
+	case SCALE_BATT_THERM:
+		return qcom_vadc_scale_batt_therm(calib_graph, prescale,
+						  absolute, adc_code,
+						  result);
 	case SCALE_THERM_100K_PULLUP:
 	case SCALE_XOTHERM:
 		return qcom_vadc_scale_therm(calib_graph, prescale,

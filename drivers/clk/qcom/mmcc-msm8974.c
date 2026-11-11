@@ -549,7 +549,7 @@ static struct clk_rcg2 pclk0_clk_src = {
 		.parent_data = mmcc_xo_dsi_hdmi_edp_gpll0,
 		.num_parents = ARRAY_SIZE(mmcc_xo_dsi_hdmi_edp_gpll0),
 		.ops = &clk_pixel_ops,
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 	},
 };
 
@@ -563,7 +563,7 @@ static struct clk_rcg2 pclk1_clk_src = {
 		.parent_data = mmcc_xo_dsi_hdmi_edp_gpll0,
 		.num_parents = ARRAY_SIZE(mmcc_xo_dsi_hdmi_edp_gpll0),
 		.ops = &clk_pixel_ops,
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 	},
 };
 
@@ -820,7 +820,7 @@ static struct clk_rcg2 byte0_clk_src = {
 		.parent_data = mmcc_xo_dsibyte_hdmi_edp_gpll0,
 		.num_parents = ARRAY_SIZE(mmcc_xo_dsibyte_hdmi_edp_gpll0),
 		.ops = &clk_byte2_ops,
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 	},
 };
 
@@ -834,7 +834,7 @@ static struct clk_rcg2 byte1_clk_src = {
 		.parent_data = mmcc_xo_dsibyte_hdmi_edp_gpll0,
 		.num_parents = ARRAY_SIZE(mmcc_xo_dsibyte_hdmi_edp_gpll0),
 		.ops = &clk_byte2_ops,
-		.flags = CLK_SET_RATE_PARENT,
+		.flags = CLK_SET_RATE_PARENT | CLK_OPS_PARENT_ENABLE,
 	},
 };
 
@@ -2748,6 +2748,24 @@ static void msm8226_clock_override(void)
 	cpp_clk_src.freq_tbl = ftbl_camss_vfe_cpp_clk_msm8226;
 }
 
+/*
+ * The GPU domains are handed over switched on, but the core does not answer
+ * on its register interface until its domain has been through a power cycle.
+ * Switch them off, child first, so that genpd finds them off and their first
+ * user powers them up.
+ */
+static void mmcc_msm8974_gpu_gdsc_off(struct regmap *regmap)
+{
+	static const unsigned int gdscr[] = { 0x4034, 0x4024 };
+	unsigned int i, val;
+
+	for (i = 0; i < ARRAY_SIZE(gdscr); i++) {
+		regmap_set_bits(regmap, gdscr[i], BIT(0));
+		regmap_read_poll_timeout(regmap, gdscr[i], val,
+					 !(val & BIT(31)), 100, 2000);
+	}
+}
+
 static int mmcc_msm8974_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
@@ -2764,6 +2782,7 @@ static int mmcc_msm8974_probe(struct platform_device *pdev)
 	if (desc == &mmcc_msm8974_desc) {
 		clk_pll_configure_sr_hpm_lp(&mmpll1, regmap, &mmpll1_config, true);
 		clk_pll_configure_sr_hpm_lp(&mmpll3, regmap, &mmpll3_config, false);
+		mmcc_msm8974_gpu_gdsc_off(regmap);
 	} else {
 		msm8226_clock_override();
 	}

@@ -27,6 +27,7 @@
 #include <linux/platform_device.h>
 #include <linux/pm.h>
 #include <linux/pm_runtime.h>
+#include <linux/workqueue.h>
 #include <linux/firmware/qcom/qcom_scm.h>
 #include <linux/slab.h>
 #include <linux/spinlock.h>
@@ -123,6 +124,20 @@ struct qcom_iommu_dev {
 	 */
 	bool			 nonsecure;
 	bool			 glb_inited;
+	/*
+	 * MSM8974 QSMMU-v2 IP quirks, keyed on the "qcom,msm8974-iommu"
+	 * compatible: no CB TCR2 register (CB+0x10 faults the SoC), AF
+	 * faulting needs the vendor SCTLR.AFFD bit, and the SMMU window has
+	 * no 8916-style wrapper page (base+0x2000 is MICRO_MMU_CTRL, so the
+	 * SMMU_INTR_SEL_NS write must never happen). These are properties of
+	 * the IP, not of the secure/non-secure split: the TZ-managed MDP
+	 * SMMU needs them exactly as much as the non-secure GPU one.
+	 */
+	bool			 is_msm8974;
+	struct delayed_work	 dbg_work;   /* DEBUG: CB state dump */
+	bool			 bfb_written;
+	/* The instance is held resumed for good since its first attach. */
+	bool			 pinned;
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -133,6 +148,8 @@ struct qcom_iommu_ctx {
 	bool			 secure_init;
 	bool			 secured_ctx;
 	u8			 asid;      /* asid and ctx bank # are 1:1 */
+	/* The bank reports faults by interrupt only and never stalls. */
+	bool			 no_stall;
 	struct iommu_domain	*domain;
 };
 
@@ -184,7 +201,40 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 	return readq_relaxed(ctx->base + reg);
 }
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
+/*
+ * Vendor BFB/prefetch block: implementation-defined SMMU global registers
+ * (base + 0x2008..0x2540) that downstream programs on every 8974 SMMU --
+ * explicitly including TZ-managed ones ("bfb settings are always programmed
+ * by HLOS", vendor msm_iommu_sec.c) -- via qcom,iommu-bfb-regs/-data pairs
+ * in the vendor DT. They configure fetch/prefetch behaviour; without them a
+ * real-time master (MDP scanout) fetches through an untuned SMMU.
+ * Values are taken from the vendor DT and carried in the same properties.
+ */
+static void qcom_iommu_write_bfb(struct qcom_iommu_dev *qcom_iommu)
+{
+	struct device_node *np = qcom_iommu->dev->of_node;
+	int nregs, ndata, i;
+	u32 off, val;
+
+	if (qcom_iommu->bfb_written || !qcom_iommu->local_base)
+		return;
+
+	nregs = of_property_count_u32_elems(np, "qcom,iommu-bfb-regs");
+	ndata = of_property_count_u32_elems(np, "qcom,iommu-bfb-data");
+	if (nregs <= 0 || nregs != ndata)
+		return;
+
+	for (i = 0; i < nregs; i++) {
+		of_property_read_u32_index(np, "qcom,iommu-bfb-regs", i, &off);
+		of_property_read_u32_index(np, "qcom,iommu-bfb-data", i, &val);
+		writel_relaxed(val, qcom_iommu->local_base + off);
+	}
+	/* ensure BFB writes land before any translation traffic */
+	wmb();
+
+	dev_info(qcom_iommu->dev, "programmed %d BFB registers\n", nregs);
+	qcom_iommu->bfb_written = true;
+}
 
 static void qcom_iommu_tlb_sync(void *cookie)
 {
@@ -283,7 +333,8 @@ static irqreturn_t qcom_iommu_fault(int irq, void *dev)
 	}
 
 	iommu_writel(ctx, ARM_SMMU_CB_FSR, fsr);
-	iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
+	if (!ctx->no_stall)
+		iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
 
 	return IRQ_HANDLED;
 }
@@ -402,8 +453,23 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	struct iommu_fwspec *fwspec = dev_iommu_fwspec_get(dev);
 	struct io_pgtable_ops *pgtbl_ops = NULL;
 	struct io_pgtable_cfg pgtbl_cfg;
+	bool use_v7s = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
 	int i, ret = 0;
 	u32 reg;
+
+	/*
+	 * A TrustZone-managed instance behind a power domain (MSM8974 MDP on
+	 * MDSS_GDSC) is powered up and configured here, at its first attach,
+	 * and then stays resumed: its context-bank registers do not survive a
+	 * power collapse and resume only redoes the TrustZone half. Nothing
+	 * powers it up before, so that it is never left configured by
+	 * TrustZone without an attached domain.
+	 */
+	if (!qcom_iommu->nonsecure && qcom_iommu->dev->pm_domain &&
+	    !qcom_iommu->pinned) {
+		pm_runtime_forbid(qcom_iommu->dev);
+		qcom_iommu->pinned = true;
+	}
 
 	mutex_lock(&qcom_domain->init_mutex);
 	if (qcom_domain->iommu) {
@@ -428,10 +494,23 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		pgtbl_cfg = io_pgtable_ops_to_pgtable(qcom_domain->pgtbl_ops)->cfg;
 	} else {
+		/*
+		 * The TZ-managed msm8974 MMSS SMMU (the MDP instance) does not
+		 * implement LPAE context banks: the vendor msm-iommu-v1 driver
+		 * programs TTBCR=0 with an ARMv7 short-descriptor first-level
+		 * table and PRRR/NMRR attributes, on every 8974 SMMU. With an
+		 * LPAE table the bank "translates" garbage: no context fault,
+		 * black scanout, and occasional fetches into protected DDR
+		 * (silent SoC reset). Use V7S format to match the hardware.
+		 * The (non-secure) GPU instance keeps LPAE, which is validated
+		 * on-device there.
+		 */
 		pgtbl_cfg = (struct io_pgtable_cfg) {
-			.pgsize_bitmap	= domain->pgsize_bitmap,
+			.pgsize_bitmap	= use_v7s ?
+				(SZ_4K | SZ_64K | SZ_1M | SZ_16M) :
+				domain->pgsize_bitmap,
 			.ias		= 32,
-			.oas		= 40,
+			.oas		= use_v7s ? 32 : 40,
 			.tlb		= &qcom_flush_ops,
 			.iommu_dev	= qcom_iommu->dev,
 		};
@@ -439,8 +518,8 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		qcom_domain->iommu = qcom_iommu;
 		qcom_domain->fwspec = fwspec;
 
-		pgtbl_ops = alloc_io_pgtable_ops(ARM_32_LPAE_S1, &pgtbl_cfg,
-						 qcom_domain);
+		pgtbl_ops = alloc_io_pgtable_ops(use_v7s ? ARM_V7S : ARM_32_LPAE_S1,
+						 &pgtbl_cfg, qcom_domain);
 		if (!pgtbl_ops) {
 			dev_err(qcom_iommu->dev,
 				"failed to allocate pagetable ops\n");
@@ -450,6 +529,7 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		domain->geometry.aperture_end = (1ULL << pgtbl_cfg.ias) - 1;
 		domain->geometry.force_aperture = true;
+		domain->pgsize_bitmap = pgtbl_cfg.pgsize_bitmap;
 
 		/*
 		 * Publish the page-table ops under init_mutex and before any
@@ -481,13 +561,25 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	for (i = 0; i < fwspec->num_ids; i++) {
 		struct qcom_iommu_ctx *ctx = to_ctx(qcom_domain, fwspec->ids[i]);
 
-		if (!ctx->secure_init && qcom_iommu_has_secure_context(qcom_iommu)) {
+		/*
+		 * TZ owns the stream mapping whenever the instance has a
+		 * qcom,iommu-secure-id -- regardless of whether any child
+		 * context bank is itself secure. Gating this on
+		 * has_secure_context() (i.e. on a "-sec" child existing)
+		 * silently skips the restore_sec_cfg() that installs
+		 * SMR/S2CR/CBAR for our -ns bank, leaving the stream
+		 * unmapped: traffic then bypasses translation and hits DDR
+		 * with raw physical addresses (msm8974 MDP: secure-id 1,
+		 * single -ns bank, is exactly this shape).
+		 */
+		if (!ctx->secure_init && !qcom_iommu->nonsecure) {
 			ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, ctx->asid);
 			if (ret) {
 				dev_err(qcom_iommu->dev, "secure init failed: %d\n", ret);
 				goto out_err;
 			}
 			ctx->secure_init = true;
+			qcom_iommu_write_bfb(qcom_iommu);
 		}
 
 		/* Secured QSMMU-500/QSMMU-v2 contexts cannot be programmed */
@@ -511,30 +603,51 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		iommu_writel(ctx, ARM_SMMU_CB_FSR, ARM_SMMU_CB_FSR_FAULT);
 
 		/* TTBRs */
-		iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
-				pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
-				FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
+		if (use_v7s) {
+			/*
+			 * Short-descriptor: 32-bit TTBR0, ASID lives in
+			 * CONTEXTIDR (vendor: msm_iommu_assign_ASID()).
+			 */
+			iommu_writel(ctx, ARM_SMMU_CB_TTBR0,
+				     pgtbl_cfg.arm_v7s_cfg.ttbr);
+			iommu_writel(ctx, ARM_SMMU_CB_CONTEXTIDR, ctx->asid);
+		} else {
+			iommu_writeq(ctx, ARM_SMMU_CB_TTBR0,
+					pgtbl_cfg.arm_lpae_s1_cfg.ttbr |
+					FIELD_PREP(ARM_SMMU_TTBRn_ASID, ctx->asid));
+		}
 		iommu_writeq(ctx, ARM_SMMU_CB_TTBR1, 0);
 
 		/*
 		 * TCR2 (CB offset 0x10) does not exist on the MSM8974 QSMMU-v2
 		 * context bank -- the downstream msm-iommu-v1 driver never writes
-		 * it, and writing it here faults and resets the SoC. Skip it on
-		 * the non-secure (msm8974) path; the PA-size/SEP it would carry is
-		 * conveyed by TCR on this IP.
+		 * it, and writing it here faults and resets the SoC. This is an
+		 * IP property, not a security-model one: the TZ-managed MDP
+		 * instance has the same CB layout as the non-secure GPU one.
 		 */
-		if (!qcom_iommu->nonsecure) {
+		if (!qcom_iommu->is_msm8974) {
 			iommu_writel(ctx, ARM_SMMU_CB_TCR2,
 					arm_smmu_lpae_tcr2(&pgtbl_cfg));
 		}
-		iommu_writel(ctx, ARM_SMMU_CB_TCR,
-			     arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE);
+		if (use_v7s) {
+			/* TTBCR=0: short-descriptor, no EAE (vendor parity). */
+			iommu_writel(ctx, ARM_SMMU_CB_TCR,
+				     pgtbl_cfg.arm_v7s_cfg.tcr);
+			/* MAIR0/MAIR1 are PRRR/NMRR in short-descriptor mode. */
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
+					pgtbl_cfg.arm_v7s_cfg.prrr);
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
+					pgtbl_cfg.arm_v7s_cfg.nmrr);
+		} else {
+			iommu_writel(ctx, ARM_SMMU_CB_TCR,
+				     arm_smmu_lpae_tcr(&pgtbl_cfg) | ARM_SMMU_TCR_EAE);
 
-		/* MAIRs (stage-1 only) */
-		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
-				pgtbl_cfg.arm_lpae_s1_cfg.mair);
-		iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
-				pgtbl_cfg.arm_lpae_s1_cfg.mair >> 32);
+			/* MAIRs (stage-1 only) */
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR0,
+					pgtbl_cfg.arm_lpae_s1_cfg.mair);
+			iommu_writel(ctx, ARM_SMMU_CB_S1_MAIR1,
+					pgtbl_cfg.arm_lpae_s1_cfg.mair >> 32);
+		}
 
 		/* SCTLR */
 		reg = ARM_SMMU_SCTLR_CFIE | ARM_SMMU_SCTLR_CFRE |
@@ -547,17 +660,31 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 		 * the first stage-1 walk even with SCTLR.AFE cleared -- unlike
 		 * the ARM SMMU architectural behaviour, clearing AFE alone does
 		 * not disable AF faulting on this IP. Set the Qualcomm-specific
-		 * AFFD (Access-Flag-Fault-Disable) bit instead. The secure path
-		 * (msm8916 etc.) keeps the architectural AFE and does not touch
-		 * the vendor AFFD bit.
+		 * AFFD (Access-Flag-Fault-Disable) bit instead. Other SoCs
+		 * (msm8916 etc.) keep the architectural AFE and do not touch
+		 * the vendor AFFD bit. Like TCR2 above this is an IP quirk,
+		 * shared by the secure MDP instance.
 		 */
-		if (qcom_iommu->nonsecure)
+		if (qcom_iommu->is_msm8974)
 			reg |= ARM_SMMU_SCTLR_AFFD;
 		else
 			reg |= ARM_SMMU_SCTLR_AFE;
 
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
 			reg |= ARM_SMMU_SCTLR_E;
+
+		/*
+		 * A fault must not stall or abort the masters of the MSM8974
+		 * TrustZone-managed instance: after the first stalled fault
+		 * every later fetch of the display times out. That first
+		 * fault always comes, from the bootloader's splash pipe
+		 * fetching its stale address once translation is on. Report
+		 * by interrupt only, as the vendor kernel does.
+		 */
+		if (use_v7s) {
+			reg &= ~(ARM_SMMU_SCTLR_CFCFG | ARM_SMMU_SCTLR_CFRE);
+			ctx->no_stall = true;
+		}
 
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
 
@@ -1001,8 +1128,13 @@ static int qcom_iommu_ctx_probe(struct platform_device *pdev)
 	 * boot-loader left us a surprise.  Enable clocks via the parent
 	 * device's PM runtime to avoid unclocked MMSS register accesses
 	 * which cause a bus error on MSM8974.
+	 *
+	 * The MSM8974 TrustZone-managed instance is left alone until its
+	 * first attach, see qcom_iommu_init_domain(); the fault status is
+	 * cleared there before the bank is enabled.
 	 */
-	if (!ctx->secured_ctx) {
+	if (!ctx->secured_ctx &&
+	    !(qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure)) {
 		ret = pm_runtime_resume_and_get(dev->parent);
 		if (ret < 0)
 			return ret;
@@ -1062,19 +1194,42 @@ static struct platform_driver qcom_iommu_ctx_driver = {
 	.remove = qcom_iommu_ctx_remove,
 };
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
+/*
+ * DEBUG (mdp-iommu bring-up): dump the live context-bank state some time
+ * after attach so we can see whether the bank is actually in the
+ * translation path (SCTLR.M, our TTBR0) and whether anything faulted.
+ */
+static void qcom_iommu_dbg_work(struct work_struct *work)
 {
-	struct device_node *child;
+	struct qcom_iommu_dev *qcom_iommu =
+		container_of(to_delayed_work(work), struct qcom_iommu_dev, dbg_work);
+	int i;
 
-	for_each_child_of_node(qcom_iommu->dev->of_node, child) {
-		if (of_device_is_compatible(child, "qcom,msm-iommu-v1-sec") ||
-		    of_device_is_compatible(child, "qcom,msm-iommu-v2-sec")) {
-			of_node_put(child);
-			return true;
-		}
+	/* Not attached yet: the dump must not be what powers it up. */
+	if (!qcom_iommu->pinned)
+		return;
+
+	if (pm_runtime_resume_and_get(qcom_iommu->dev) < 0)
+		return;
+
+	for (i = 0; i <= qcom_iommu->max_asid; i++) {
+		struct qcom_iommu_ctx *ctx = qcom_iommu->ctxs[i];
+
+		if (!ctx)
+			continue;
+		dev_info(qcom_iommu->dev,
+			 "DBG ctx asid=%d domain=%d SCTLR=%08x TTBR0=%08x%08x TCR=%08x FSR=%08x FAR=%08x%08x\n",
+			 ctx->asid, ctx->domain != NULL,
+			 iommu_readl(ctx, ARM_SMMU_CB_SCTLR),
+			 (u32)(iommu_readq(ctx, ARM_SMMU_CB_TTBR0) >> 32),
+			 (u32)iommu_readq(ctx, ARM_SMMU_CB_TTBR0),
+			 iommu_readl(ctx, ARM_SMMU_CB_TCR),
+			 iommu_readl(ctx, ARM_SMMU_CB_FSR),
+			 (u32)(iommu_readq(ctx, ARM_SMMU_CB_FAR) >> 32),
+			 (u32)iommu_readq(ctx, ARM_SMMU_CB_FAR));
 	}
 
-	return false;
+	pm_runtime_put(qcom_iommu->dev);
 }
 
 static int qcom_iommu_device_probe(struct platform_device *pdev)
@@ -1085,6 +1240,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct clk *clk;
 	int ret, max_asid = 0;
+	bool late_rpm;
 
 	/* find the max asid (which is 1:1 to ctx bank idx), so we know how
 	 * many child ctx devices we have:
@@ -1149,15 +1305,24 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		/*
 		 * A non-secure IOMMU (e.g. the MSM8974 GPU/Venus SMMUs) has no
 		 * TrustZone-owned stream mapping: HLOS programs it directly and
-		 * no restore_sec_cfg()/secure page-table pool is needed. All
-		 * secure-only paths below are gated by
-		 * qcom_iommu_has_secure_context(), so sec_id stays unused here.
+		 * no restore_sec_cfg()/secure page-table pool is needed, so
+		 * sec_id stays unused here.
 		 */
 		qcom_iommu->sec_id = -1;
 		qcom_iommu->nonsecure = true;
 	}
 
-	if (qcom_iommu_has_secure_context(qcom_iommu)) {
+	qcom_iommu->is_msm8974 = of_device_is_compatible(dev->of_node,
+							 "qcom,msm8974-iommu");
+
+	/*
+	 * TrustZone needs its page-table pool before it is asked to configure
+	 * an instance, whether or not that instance declares a secure context
+	 * bank. Without the pool restore_sec_cfg() still reports success, but
+	 * installs no stream mapping: the instance stays in bypass and its
+	 * masters fetch physical memory at the IOVAs they are given.
+	 */
+	if (!qcom_iommu->nonsecure) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
 		if (ret) {
 			dev_err(dev, "cannot init secure pg table(%d)\n", ret);
@@ -1167,10 +1332,25 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, qcom_iommu);
 
-	pm_runtime_enable(dev);
+	/*
+	 * The driver core resumes a parent to probe its children. The MSM8974
+	 * TrustZone-managed instance must not be resumed before its first
+	 * attach, so its runtime PM is only enabled once the context banks
+	 * are there.
+	 */
+	late_rpm = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
+	if (!late_rpm)
+		pm_runtime_enable(dev);
+
+	/* DEBUG (mdp-iommu bring-up): dump CB state 20 s after probe. */
+	INIT_DELAYED_WORK(&qcom_iommu->dbg_work, qcom_iommu_dbg_work);
+	if (qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure)
+		schedule_delayed_work(&qcom_iommu->dbg_work, 20 * HZ);
 
 	/* register context bank devices, which are child nodes: */
 	ret = devm_of_platform_populate(dev);
+	if (late_rpm)
+		pm_runtime_enable(dev);
 	if (ret) {
 		dev_err(dev, "Failed to populate iommu contexts\n");
 		goto err_pm_disable;
@@ -1189,7 +1369,14 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		goto err_sysfs_remove;
 	}
 
-	if (qcom_iommu->local_base && qcom_iommu_has_secure_context(qcom_iommu)) {
+	/*
+	 * SMMU_INTR_SEL_NS lives in the 8916-style wrapper window; the
+	 * msm8974 SMMU has no such window and base+0x2000 is MICRO_MMU_CTRL
+	 * -- writing 0xffffffff there asserts HALT_REQ with garbage config
+	 * and wedges the MMSS bus (empirically: boot loop). Never on 8974.
+	 */
+	if (qcom_iommu->local_base && !qcom_iommu->is_msm8974 &&
+	    !qcom_iommu->nonsecure) {
 		ret = pm_runtime_resume_and_get(dev);
 		if (ret < 0)
 			goto err_pm_disable;
@@ -1210,6 +1397,7 @@ static void qcom_iommu_device_remove(struct platform_device *pdev)
 {
 	struct qcom_iommu_dev *qcom_iommu = platform_get_drvdata(pdev);
 
+	cancel_delayed_work_sync(&qcom_iommu->dbg_work);
 	pm_runtime_force_suspend(&pdev->dev);
 	platform_set_drvdata(pdev, NULL);
 	iommu_device_sysfs_remove(&qcom_iommu->iommu);
@@ -1305,7 +1493,7 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	if (ret < 0)
 		goto err_icc;
 
-	if (dev->pm_domain && qcom_iommu_has_secure_context(qcom_iommu)) {
+	if (dev->pm_domain && !qcom_iommu->nonsecure) {
 		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
 		if (ret)
 			goto err_clk;

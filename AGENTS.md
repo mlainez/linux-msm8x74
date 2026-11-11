@@ -4,7 +4,7 @@ This is a downstream Linux kernel fork for **Qualcomm MSM8974** devices
 (Fairphone 2 and friends). It tracks mainline LTS stable branches directly and
 owns its patches. Two series run in parallel (see §1): **6.12 is the production
 baseline** (its display works — drm/msm still has the vram carveout there) and
-**6.18 is LTS-tracking/research** (its display is unsolved upstream-wide). Both
+**6.18 is LTS-tracking** (its display runs through the MDP IOMMU, see §1). Both
 are LTS with the same projected EOL, Dec 2028. It feeds two consumers:
 
 - **citronics-kernel** → Debian/Ubuntu kernels for users to try
@@ -34,10 +34,14 @@ Two series are maintained in parallel, both LTS with the same projected EOL
 | Series | Role | Display |
 |---|---|---|
 | **6.12** | **production baseline** — `6.12/baseline` = stable `linux-6.12.y` + msm8974-mainline's 6.12 work; features are added on top (sensors, then DVFS) | **works**: drm/msm still has the vram carveout (`msm.vram=192m`) |
-| **6.18** | LTS-tracking / research | **broken and unsolved**: 6.18 removed the carveout (msm8974 was its only user) and no working MDP-IOMMU display exists for this family. Findings and resume points: `docs/reports/6.18-display-findings.md` |
+| **6.18** | LTS-tracking — carries the 6.12 feature series (DVFS, thermal, charger, sensors) plus loudspeaker audio | **works through the MDP IOMMU** (6.18 removed the carveout): display, GPU and console on the FP2 panel. Fixes: `6.18/topic/mdp-iommu-bringup`, `oxili-gdsc-handoff`, `fp2-l7-always-on`, `spm-rail-floor` |
 
-Consequence for planning: **feature work that must ship goes on 6.12**; 6.18
-work continues only to solve display (or to prepare for the day it is solved).
+6.18 state on the FP2 phone (2026-11-11): one 62 min soak with display, GPU,
+ADSP and audio active, no fault. Open: the reason the core rail needs the
+835 mV floor of `spm-rail-floor` on 6.18 and not on 6.12, and a rare hang in
+the first seconds of boot. **Feature work that must ship still goes on 6.12**
+until 6.18 has passed the rc gate (§1.1).
+
 `6.12/baseline` and `6.18/baseline` both receive automated stable merges (§5).
 
 | Tier | Example | Purpose | Lifecycle |
