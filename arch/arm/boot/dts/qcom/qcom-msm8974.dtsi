@@ -2164,7 +2164,6 @@
 				 <&mmcc MDSS_AXI_CLK>;
 			clock-names = "iface", "bus";
 			power-domains = <&mmcc MDSS_GDSC>;
-			interconnects = <&mmssnoc MNOC_MAS_MDP_PORT0 &bimc BIMC_SLV_EBI_CH0>;
 			/* TrustZone owns the global space / stream mapping. */
 			qcom,iommu-secure-id = <1>;
 			/* Vendor fetch/prefetch tuning (msm8974-v2-iommu.dtsi). */
