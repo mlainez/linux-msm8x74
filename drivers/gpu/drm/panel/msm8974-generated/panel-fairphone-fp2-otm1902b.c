@@ -119,6 +119,18 @@ static int otm1902b_prepare(struct drm_panel *panel)
 		return ret;
 	}
 
+	/* DEBUG: what does the panel say right after its init sequence? */
+	{
+		u8 mode = 0xee, sig = 0xee;
+		int r1 = mipi_dsi_dcs_read(ctx->dsi, MIPI_DCS_GET_POWER_MODE,
+					   &mode, 1);
+		int r2 = mipi_dsi_dcs_read(ctx->dsi, MIPI_DCS_GET_SIGNAL_MODE,
+					   &sig, 1);
+
+		dev_info(dev, "DBG after init: power_mode ret=%d val=%02x, signal_mode ret=%d val=%02x\n",
+			 r1, mode, r2, sig);
+	}
+
 	ctx->prepared = true;
 	return 0;
 }
@@ -235,6 +247,42 @@ otm1902b_create_backlight(struct mipi_dsi_device *dsi)
 	return devm_backlight_device_register(dev, dev_name(dev), dev, dsi,
 					      &otm1902b_bl_ops, &props);
 }
+
+/*
+ * DEBUG: read the panel's own state back over DSI (control for the same
+ * instrument on 6.18, where every command goes through the MDP SMMU).
+ */
+static ssize_t panel_status_show(struct device *dev,
+				 struct device_attribute *attr, char *buf)
+{
+	static const struct { u8 cmd; u8 len; const char *name; } rd[] = {
+		{ MIPI_DCS_GET_POWER_MODE, 1, "power_mode" },
+		{ MIPI_DCS_GET_ADDRESS_MODE, 1, "address_mode" },
+		{ MIPI_DCS_GET_PIXEL_FORMAT, 1, "pixel_format" },
+		{ MIPI_DCS_GET_DISPLAY_MODE, 1, "display_mode" },
+		{ MIPI_DCS_GET_SIGNAL_MODE, 1, "signal_mode" },
+		{ MIPI_DCS_GET_DIAGNOSTIC_RESULT, 1, "diagnostic" },
+		{ MIPI_DCS_GET_DISPLAY_ID, 3, "display_id" },
+		{ MIPI_DCS_READ_MEMORY_START, 10, "memory" },
+	};
+	struct mipi_dsi_device *dsi = to_mipi_dsi_device(dev);
+	unsigned long flags = dsi->mode_flags;
+	ssize_t len = 0;
+	u8 data[16];
+	int i, ret;
+
+	dsi->mode_flags |= MIPI_DSI_MODE_LPM;
+	for (i = 0; i < ARRAY_SIZE(rd); i++) {
+		memset(data, 0, sizeof(data));
+		ret = mipi_dsi_dcs_read(dsi, rd[i].cmd, data, rd[i].len);
+		len += sysfs_emit_at(buf, len, "%02x %-12s ret=%d data=%*ph\n",
+				     rd[i].cmd, rd[i].name, ret, rd[i].len, data);
+	}
+	dsi->mode_flags = flags;
+
+	return len;
+}
+static DEVICE_ATTR_RO(panel_status);
 
 static int otm1902b_probe(struct mipi_dsi_device *dsi)
 {
