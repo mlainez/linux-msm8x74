@@ -2,6 +2,7 @@
 // Copyright (c) 2018, The Linux Foundation. All rights reserved.
 
 #include <linux/kernel.h>
+#include <linux/cpuidle.h>
 #include <linux/delay.h>
 #include <linux/init.h>
 #include <linux/module.h>
@@ -495,7 +496,12 @@ static int krait_cc_probe(struct platform_device *pdev)
 	 * secondary mux is not sourcing off of QSB. The rate is then set to
 	 * two different rates to force a HFPLL reinit under all
 	 * circumstances.
+	 *
+	 * These rate changes do not go through cpufreq, whose transitions keep
+	 * the cores out of power collapse: keep them out of it here as well,
+	 * whatever the order in which this driver and cpuidle come up.
 	 */
+	cpuidle_pause_and_lock();
 	cur_rate = clk_get_rate(clks[l2_mux]);
 	aux_rate = 384000000;
 	if (cur_rate < aux_rate) {
@@ -519,6 +525,7 @@ static int krait_cc_probe(struct platform_device *pdev)
 		clk_set_rate(clk, cur_rate);
 		pr_info("CPU%d @ %lu KHz\n", cpu, clk_get_rate(clk) / 1000);
 	}
+	cpuidle_resume_and_unlock();
 
 	of_clk_add_provider(dev->of_node, krait_of_get, clks);
 
