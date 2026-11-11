@@ -146,6 +146,8 @@ struct qcom_iommu_ctx {
 	bool			 secure_init;
 	bool			 secured_ctx;
 	u8			 asid;      /* asid and ctx bank # are 1:1 */
+	/* The bank reports faults by interrupt only and never stalls. */
+	bool			 no_stall;
 	struct iommu_domain	*domain;
 };
 
@@ -329,7 +331,8 @@ static irqreturn_t qcom_iommu_fault(int irq, void *dev)
 	}
 
 	iommu_writel(ctx, ARM_SMMU_CB_FSR, fsr);
-	iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
+	if (!ctx->no_stall)
+		iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
 
 	return IRQ_HANDLED;
 }
@@ -653,6 +656,19 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
 			reg |= ARM_SMMU_SCTLR_E;
+
+		/*
+		 * A fault must not stall or abort the masters of the MSM8974
+		 * TrustZone-managed instance: after the first stalled fault
+		 * every later fetch of the display times out. That first
+		 * fault always comes, from the bootloader's splash pipe
+		 * fetching its stale address once translation is on. Report
+		 * by interrupt only, as the vendor kernel does.
+		 */
+		if (use_v7s) {
+			reg &= ~(ARM_SMMU_SCTLR_CFCFG | ARM_SMMU_SCTLR_CFRE);
+			ctx->no_stall = true;
+		}
 
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
 
