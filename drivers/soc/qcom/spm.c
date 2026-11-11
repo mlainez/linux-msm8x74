@@ -18,6 +18,7 @@
 #include <linux/kernel.h>
 #include <linux/linear_range.h>
 #include <linux/module.h>
+#include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_reserved_mem.h>
 #include <linux/sched/clock.h>
@@ -128,6 +129,20 @@ struct spm_driver_data {
 	unsigned int vdd_failures;
 	struct dentry *debugfs;
 	int reg_cpu;
+	/*
+	 * The gang rail has one consumer per CPU, and the regulator core only
+	 * counts those that have asked for a voltage.  A CPU that cpufreq has
+	 * not moved yet still runs at its boot frequency without a request, so
+	 * the first CPUs to scale down would take the rail below what it needs.
+	 * Until every possible CPU has completed a transition the rail is kept
+	 * at or above floor_sel, the level programmed at probe; volt_sel then
+	 * holds the selector the regulator core asked for, not the higher one
+	 * in the hardware.  rail_lock serialises the writes and this state.
+	 */
+	struct mutex rail_lock;
+	unsigned int floor_sel;
+	bool floor_active;
+	struct cpumask voted;
 	/*
 	 * set_vdd() cannot return a value (it is an smp_call_func_t), so it
 	 * records the outcome here for spm_set_voltage_sel() to propagate.
@@ -642,6 +657,98 @@ static void spm_spc_unblock(void)
 		wake_up_all_idle_cpus();
 }
 
+/*
+ * Program the L2/APCS gang rail (RST kick -> VCTL -> PMIC_STS poll) with
+ * per-core power collapse blocked and preemption disabled.  This rail has no
+ * associated CPU (reg_cpu < 0) so set_vdd() executes in the caller's context
+ * on an arbitrary CPU; if that CPU is scheduled away - or, worse, enters
+ * cpuidle and runs its own per-core SPM power-collapse sequence - between the
+ * RST and the completion of the PMIC handshake, the SAW state machine on the
+ * shared rail is left mid-operation and the SoC silently resets (PS_HOLD).
+ * The vendor wraps the identical write in get_cpu()/put_cpu() for exactly
+ * this reason.  IRQs are deliberately left enabled - the vendor's apcs-master
+ * path does not disable them.
+ */
+static int spm_l2_program(struct spm_driver_data *drv, unsigned int selector)
+{
+	drv->volt_sel_req = selector;
+	drv->set_vdd_ret = 0;
+
+	if (spm_spc_block()) {
+		spm_spc_unblock();
+		drv->vdd_failures++;
+		return -EBUSY;
+	}
+	preempt_disable();
+	spm_trace(SPM_EV_VDD_BEGIN, selector);
+	drv->reg_data->set_vdd(drv);
+	spm_trace(SPM_EV_VDD_END, selector);
+	preempt_enable();
+	spm_spc_unblock();
+
+	return drv->set_vdd_ret;
+}
+
+/* The gang-rail SAW, for the cpufreq notifier */
+static struct spm_driver_data *spm_l2_drv;
+
+/*
+ * Per policy: the failed rail writes seen when its transition began, whether
+ * that transition then had one, and whether the transition now running is
+ * the one the cpufreq core announces to take a failed one back.
+ */
+static struct spm_vote {
+	unsigned int failures;
+	bool failed;
+	bool revert;
+} spm_vote[NR_CPUS];
+
+static void spm_vote_pre(struct cpufreq_policy *policy)
+{
+	struct spm_driver_data *drv = spm_l2_drv;
+	struct spm_vote *v = &spm_vote[policy->cpu];
+
+	if (!drv || !READ_ONCE(drv->floor_active))
+		return;
+
+	v->revert = v->failed;
+	v->failed = false;
+	v->failures = READ_ONCE(drv->vdd_failures);
+}
+
+/*
+ * A completed transition leaves the CPU's voltage request with the regulator
+ * core, unless a rail write failed in it: the request may then not have been
+ * made, and neither that transition nor the one announced to take it back
+ * counts.  Release the rail once every possible CPU has a request.
+ */
+static void spm_vote_post(struct cpufreq_policy *policy)
+{
+	struct spm_driver_data *drv = spm_l2_drv;
+	struct spm_vote *v = &spm_vote[policy->cpu];
+
+	if (!drv || !READ_ONCE(drv->floor_active))
+		return;
+
+	if (v->revert) {
+		v->revert = false;
+		return;
+	}
+	if (v->failures != READ_ONCE(drv->vdd_failures)) {
+		v->failed = true;
+		return;
+	}
+
+	mutex_lock(&drv->rail_lock);
+	cpumask_or(&drv->voted, &drv->voted, policy->related_cpus);
+	if (drv->floor_active && cpumask_subset(cpu_possible_mask, &drv->voted)) {
+		drv->floor_active = false;
+		/* A failure leaves the rail above the request until the next write */
+		spm_l2_program(drv, drv->volt_sel);
+	}
+	mutex_unlock(&drv->rail_lock);
+}
+
 static int spm_cpufreq_notify(struct notifier_block *nb, unsigned long event,
 			      void *data)
 {
@@ -653,9 +760,11 @@ static int spm_cpufreq_notify(struct notifier_block *nb, unsigned long event,
 		if (spm_spc_block())
 			pr_err_ratelimited("qcom_spm: cpu%u changes frequency with a core still in power collapse\n",
 					   freqs->policy->cpu);
+		spm_vote_pre(freqs->policy);
 	} else if (event == CPUFREQ_POSTCHANGE) {
 		spm_spc_unblock();
 		spm_trace(SPM_EV_FREQ_POST, freqs->new / 1000);
+		spm_vote_post(freqs->policy);
 	}
 	return NOTIFY_OK;
 }
@@ -667,50 +776,36 @@ static struct notifier_block spm_cpufreq_nb = {
 static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
+	unsigned int target = selector;
+	int ret;
 
-	drv->volt_sel_req = selector;
-	drv->set_vdd_ret = 0;
 	drv->vdd_writes++;
 
 	if (drv->reg_cpu >= 0) {
-		int ret = smp_call_function_single(drv->reg_cpu,
-						  drv->reg_data->set_vdd,
-						  drv, true);
+		drv->volt_sel_req = selector;
+		drv->set_vdd_ret = 0;
+		ret = smp_call_function_single(drv->reg_cpu,
+					       drv->reg_data->set_vdd,
+					       drv, true);
 		return ret ? : drv->set_vdd_ret;
 	}
 
+	mutex_lock(&drv->rail_lock);
+	if (drv->floor_active)
+		target = max(target, drv->floor_sel);
 	/*
-	 * Run the L2/APCS gang-rail write (RST kick -> VCTL -> PMIC_STS poll)
-	 * with preemption disabled.  This rail has no associated CPU
-	 * (reg_cpu < 0) so set_vdd() executes in the caller's context on an
-	 * arbitrary CPU; if that CPU is scheduled away - or, worse, enters
-	 * cpuidle and runs its own per-core SPM power-collapse sequence -
-	 * between the RST and the completion of the PMIC handshake, the SAW
-	 * state machine on the shared rail is left mid-operation and the SoC
-	 * silently resets (PS_HOLD).  The vendor wraps the identical write in
-	 * get_cpu()/put_cpu() for exactly this reason; preemption-off is the one
-	 * context it guarantees that this driver lacked.  IRQs are deliberately
-	 * left enabled - the vendor's apcs-master path does not disable them.
-	 */
-	if (spm_spc_block()) {
-		spm_spc_unblock();
-		return -EBUSY;
-	}
-	preempt_disable();
-	spm_trace(SPM_EV_VDD_BEGIN, selector);
-	drv->reg_data->set_vdd(drv);
-	spm_trace(SPM_EV_VDD_END, selector);
-	preempt_enable();
-	spm_spc_unblock();
-
-	/*
-	 * Propagate a failed rail write.  Without this the OPP core sees
+	 * A failed rail write is propagated.  Without this the OPP core sees
 	 * success and goes on to raise the clock, so a rail that never reached
 	 * the requested level is followed by a frequency the silicon has not
 	 * been given the voltage for.  The vendor driver returns -EIO here and
 	 * aborts the transition for the same reason.
 	 */
-	return drv->set_vdd_ret;
+	ret = spm_l2_program(drv, target);
+	if (!ret)
+		drv->volt_sel = selector;
+	mutex_unlock(&drv->rail_lock);
+
+	return ret;
 }
 
 static int spm_stats_show(struct seq_file *s, void *data)
@@ -723,7 +818,10 @@ static int spm_stats_show(struct seq_file *s, void *data)
 	seq_printf(s, "spc_waits    %u\n", spm_spc_waits);
 	seq_printf(s, "spc_timeouts %u\n", spm_spc_timeouts);
 	seq_printf(s, "volt_sel     %u (confirmed)\n", drv->volt_sel);
-	seq_printf(s, "volt_sel_req %u (last requested)\n", drv->volt_sel_req);
+	seq_printf(s, "volt_sel_req %u (last programmed)\n", drv->volt_sel_req);
+	seq_printf(s, "boot_floor   %u (%s, voted %*pbl)\n", drv->floor_sel,
+		   drv->floor_active ? "held" : "released",
+		   cpumask_pr_args(&drv->voted));
 	return 0;
 }
 DEFINE_SHOW_ATTRIBUTE(spm_stats);
@@ -994,6 +1092,7 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		return ret;
 	}
 	drv->volt_sel_req = drv->volt_sel;
+	mutex_init(&drv->rail_lock);
 
 	/*
 	 * Program initial voltage to hardware so the SAW2 VCTL register
@@ -1013,6 +1112,10 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		return dev_err_probe(dev, drv->set_vdd_ret,
 				     "failed to set the initial voltage\n");
 
+	/* In place before the regulator, and so its consumers, exist */
+	drv->floor_sel = drv->volt_sel;
+	drv->floor_active = drv->reg_data == &spm_reg_8974_8084_l2;
+
 	rdev = devm_regulator_register(dev, rdesc, &config);
 	if (IS_ERR(rdev)) {
 		dev_err(dev, "failed to register regulator\n");
@@ -1027,6 +1130,7 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	}
 
 	if (drv->reg_data == &spm_reg_8974_8084_l2) {
+		spm_l2_drv = drv;
 		spm_trace_init(dev);
 		if (spm_tprev && drv->debugfs)
 			debugfs_create_file("spc_previous", 0444, drv->debugfs, NULL,
