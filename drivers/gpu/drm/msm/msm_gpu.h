@@ -64,6 +64,15 @@ struct msm_gpu_funcs {
 	irqreturn_t (*irq)(struct msm_gpu *irq);
 	struct msm_ringbuffer *(*active_ring)(struct msm_gpu *gpu);
 	void (*recover)(struct msm_gpu *gpu);
+	/**
+	 * @soft_reset: Optional hook to quiesce a wedged GPU by soft reset.
+	 *
+	 * Called with the GPU powered and clocked, before the GPU is
+	 * power-collapsed after a failed hw_init, so that a stuck CP cannot
+	 * hold an in-flight bus transaction across the power collapse.
+	 * Unlike @recover this must not touch rings or scheduler state.
+	 */
+	void (*soft_reset)(struct msm_gpu *gpu);
 	void (*destroy)(struct msm_gpu *gpu);
 #if defined(CONFIG_DEBUG_FS) || defined(CONFIG_DEV_COREDUMP)
 	/* show GPU status in debugfs: */
