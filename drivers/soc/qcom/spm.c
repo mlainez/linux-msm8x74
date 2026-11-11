@@ -773,6 +773,9 @@ static struct notifier_block spm_cpufreq_nb = {
 	.notifier_call = spm_cpufreq_notify,
 };
 
+static unsigned int spm_rail_min_sel;
+module_param_named(rail_min_sel, spm_rail_min_sel, uint, 0644);
+
 static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector)
 {
 	struct spm_driver_data *drv = rdev_get_drvdata(rdev);
@@ -793,6 +796,8 @@ static int spm_set_voltage_sel(struct regulator_dev *rdev, unsigned int selector
 	mutex_lock(&drv->rail_lock);
 	if (drv->floor_active)
 		target = max(target, drv->floor_sel);
+	/* DEBUG: never program the gang rail below this selector */
+	target = max(target, spm_rail_min_sel);
 	/*
 	 * A failed rail write is propagated.  Without this the OPP core sees
 	 * success and goes on to raise the clock, so a rail that never reached
