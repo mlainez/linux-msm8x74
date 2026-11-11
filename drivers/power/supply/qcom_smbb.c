@@ -2008,37 +2008,6 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	mutex_init(&chg->hwlock);
 
 	/*
-	 * Optional: a battery-voltage channel lets the supervisor recognise a
-	 * full battery instead of retrying against the recharge comparator.
-	 *
-	 * Its provider may not be bound yet. Defer here, before anything is
-	 * registered or written: the interrupt handlers below start the
-	 * supervisor, which drives the charge path enable, and on a board
-	 * without a battery that path is the system supply.
-	 */
-	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
-	if (IS_ERR(chg->vbat_chan)) {
-		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
-		chg->vbat_chan = NULL;
-	}
-
-	/*
-	 * Optional as well: the battery thermistor, for the temperature window
-	 * described at enum smbb_zone. A board that does not wire it up keeps
-	 * relying on the PMIC comparators alone.
-	 */
-	chg->temp_chan = devm_iio_channel_get(&pdev->dev, "batt-therm");
-	if (IS_ERR(chg->temp_chan)) {
-		if (PTR_ERR(chg->temp_chan) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		dev_dbg(&pdev->dev, "no batt-therm channel: %pe\n",
-			chg->temp_chan);
-		chg->temp_chan = NULL;
-	}
-
-	/*
 	 * The supervisor requeues itself and is kicked from the interrupt
 	 * handlers: it must not outlive chg on a failed probe or an unbind.
 	 * Registered before the interrupts, so it is cancelled after they are
@@ -2103,6 +2072,38 @@ static int smbb_charger_probe(struct platform_device *pdev)
 			 "hardware ceilings are above the configured %u uV and %u uA\n",
 			 chg->dt_attr[ATTR_BAT_VSAFE],
 			 chg->dt_attr[ATTR_BAT_ISAFE]);
+
+	/*
+	 * Optional: a battery-voltage channel lets the supervisor recognise a
+	 * full battery instead of retrying against the recharge comparator.
+	 *
+	 * Its provider may not be bound yet. Defer here, before anything is
+	 * registered: the interrupt handlers below start the supervisor, which
+	 * drives the charge path enable, and on a board without a battery that
+	 * path is the system supply. The limits above are already programmed,
+	 * so the charger does not sit on the boot chain's values meanwhile.
+	 */
+	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
+	if (IS_ERR(chg->vbat_chan)) {
+		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
+		chg->vbat_chan = NULL;
+	}
+
+	/*
+	 * Optional as well: the battery thermistor, for the temperature window
+	 * described at enum smbb_zone. A board that does not wire it up keeps
+	 * relying on the PMIC comparators alone.
+	 */
+	chg->temp_chan = devm_iio_channel_get(&pdev->dev, "batt-therm");
+	if (IS_ERR(chg->temp_chan)) {
+		if (PTR_ERR(chg->temp_chan) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "no batt-therm channel: %pe\n",
+			chg->temp_chan);
+		chg->temp_chan = NULL;
+	}
 
 	bat_cfg.drv_data = chg;
 	bat_cfg.of_node = pdev->dev.of_node;
