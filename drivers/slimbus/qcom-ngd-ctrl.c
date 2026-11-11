@@ -1018,7 +1018,17 @@ static int qcom_slim_ngd_enable_stream(struct slim_stream_runtime *rt)
 		if (txn.msg->num_bytes == 0) {
 			int exp = 0, coef = 0;
 
-			wbuf[txn.msg->num_bytes++] = sdev->laddr;
+			/*
+			 * In the DEF_ACT_CHAN user message this byte is
+			 * (data_format << 5) | (client_laddr & 0x1f) -- only
+			 * the low 5 bits hold the client's logical address.
+			 * Codecs assigned a laddr >= 0x20 (e.g. WCD9320 PGD
+			 * at 0xcb on msm8974) otherwise spill their high laddr
+			 * bits into the data-format field, so the framer
+			 * defines the channel with a bogus format and never
+			 * schedules data. Mask it (data_format 0 for audio).
+			 */
+			wbuf[txn.msg->num_bytes++] = sdev->laddr & 0x1f;
 			wbuf[txn.msg->num_bytes] = rt->bps >> 2 |
 						   (port->ch.aux_fmt << 6);
 
