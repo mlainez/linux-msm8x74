@@ -136,6 +136,8 @@ struct qcom_iommu_dev {
 	bool			 is_msm8974;
 	struct delayed_work	 dbg_work;   /* DEBUG: CB state dump */
 	bool			 bfb_written;
+	/* The instance is held resumed for good since its first attach. */
+	bool			 pinned;
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -146,6 +148,8 @@ struct qcom_iommu_ctx {
 	bool			 secure_init;
 	bool			 secured_ctx;
 	u8			 asid;      /* asid and ctx bank # are 1:1 */
+	/* The bank reports faults by interrupt only and never stalls. */
+	bool			 no_stall;
 	struct iommu_domain	*domain;
 };
 
@@ -196,8 +200,6 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 {
 	return readq_relaxed(ctx->base + reg);
 }
-
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
 
 /*
  * Vendor BFB/prefetch block: implementation-defined SMMU global registers
@@ -331,7 +333,8 @@ static irqreturn_t qcom_iommu_fault(int irq, void *dev)
 	}
 
 	iommu_writel(ctx, ARM_SMMU_CB_FSR, fsr);
-	iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
+	if (!ctx->no_stall)
+		iommu_writel(ctx, ARM_SMMU_CB_RESUME, ARM_SMMU_RESUME_TERMINATE);
 
 	return IRQ_HANDLED;
 }
@@ -453,6 +456,20 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	bool use_v7s = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
 	int i, ret = 0;
 	u32 reg;
+
+	/*
+	 * A TrustZone-managed instance behind a power domain (MSM8974 MDP on
+	 * MDSS_GDSC) is powered up and configured here, at its first attach,
+	 * and then stays resumed: its context-bank registers do not survive a
+	 * power collapse and resume only redoes the TrustZone half. Nothing
+	 * powers it up before, so that it is never left configured by
+	 * TrustZone without an attached domain.
+	 */
+	if (!qcom_iommu->nonsecure && qcom_iommu->dev->pm_domain &&
+	    !qcom_iommu->pinned) {
+		pm_runtime_forbid(qcom_iommu->dev);
+		qcom_iommu->pinned = true;
+	}
 
 	mutex_lock(&qcom_domain->init_mutex);
 	if (qcom_domain->iommu) {
@@ -655,6 +672,19 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
 			reg |= ARM_SMMU_SCTLR_E;
+
+		/*
+		 * A fault must not stall or abort the masters of the MSM8974
+		 * TrustZone-managed instance: after the first stalled fault
+		 * every later fetch of the display times out. That first
+		 * fault always comes, from the bootloader's splash pipe
+		 * fetching its stale address once translation is on. Report
+		 * by interrupt only, as the vendor kernel does.
+		 */
+		if (use_v7s) {
+			reg &= ~(ARM_SMMU_SCTLR_CFCFG | ARM_SMMU_SCTLR_CFRE);
+			ctx->no_stall = true;
+		}
 
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
 
@@ -1098,8 +1128,13 @@ static int qcom_iommu_ctx_probe(struct platform_device *pdev)
 	 * boot-loader left us a surprise.  Enable clocks via the parent
 	 * device's PM runtime to avoid unclocked MMSS register accesses
 	 * which cause a bus error on MSM8974.
+	 *
+	 * The MSM8974 TrustZone-managed instance is left alone until its
+	 * first attach, see qcom_iommu_init_domain(); the fault status is
+	 * cleared there before the bank is enabled.
 	 */
-	if (!ctx->secured_ctx) {
+	if (!ctx->secured_ctx &&
+	    !(qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure)) {
 		ret = pm_runtime_resume_and_get(dev->parent);
 		if (ret < 0)
 			return ret;
@@ -1159,21 +1194,6 @@ static struct platform_driver qcom_iommu_ctx_driver = {
 	.remove = qcom_iommu_ctx_remove,
 };
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
-{
-	struct device_node *child;
-
-	for_each_child_of_node(qcom_iommu->dev->of_node, child) {
-		if (of_device_is_compatible(child, "qcom,msm-iommu-v1-sec") ||
-		    of_device_is_compatible(child, "qcom,msm-iommu-v2-sec")) {
-			of_node_put(child);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 /*
  * DEBUG (mdp-iommu bring-up): dump the live context-bank state some time
  * after attach so we can see whether the bank is actually in the
@@ -1184,6 +1204,10 @@ static void qcom_iommu_dbg_work(struct work_struct *work)
 	struct qcom_iommu_dev *qcom_iommu =
 		container_of(to_delayed_work(work), struct qcom_iommu_dev, dbg_work);
 	int i;
+
+	/* Not attached yet: the dump must not be what powers it up. */
+	if (!qcom_iommu->pinned)
+		return;
 
 	if (pm_runtime_resume_and_get(qcom_iommu->dev) < 0)
 		return;
@@ -1216,6 +1240,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct clk *clk;
 	int ret, max_asid = 0;
+	bool late_rpm;
 
 	/* find the max asid (which is 1:1 to ctx bank idx), so we know how
 	 * many child ctx devices we have:
@@ -1280,9 +1305,8 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		/*
 		 * A non-secure IOMMU (e.g. the MSM8974 GPU/Venus SMMUs) has no
 		 * TrustZone-owned stream mapping: HLOS programs it directly and
-		 * no restore_sec_cfg()/secure page-table pool is needed. All
-		 * secure-only paths below are gated by
-		 * qcom_iommu_has_secure_context(), so sec_id stays unused here.
+		 * no restore_sec_cfg()/secure page-table pool is needed, so
+		 * sec_id stays unused here.
 		 */
 		qcom_iommu->sec_id = -1;
 		qcom_iommu->nonsecure = true;
@@ -1291,7 +1315,14 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	qcom_iommu->is_msm8974 = of_device_is_compatible(dev->of_node,
 							 "qcom,msm8974-iommu");
 
-	if (qcom_iommu_has_secure_context(qcom_iommu)) {
+	/*
+	 * TrustZone needs its page-table pool before it is asked to configure
+	 * an instance, whether or not that instance declares a secure context
+	 * bank. Without the pool restore_sec_cfg() still reports success, but
+	 * installs no stream mapping: the instance stays in bypass and its
+	 * masters fetch physical memory at the IOVAs they are given.
+	 */
+	if (!qcom_iommu->nonsecure) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
 		if (ret) {
 			dev_err(dev, "cannot init secure pg table(%d)\n", ret);
@@ -1301,18 +1332,15 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, qcom_iommu);
 
-	pm_runtime_enable(dev);
-
 	/*
-	 * A TZ-managed instance behind a power domain (msm8974 MDP SMMU on
-	 * MDSS_GDSC) loses its context-bank registers on power collapse, and
-	 * the resume path only re-runs restore_sec_cfg() -- the TZ/global
-	 * half. Until a per-CB reprogram-on-resume exists, keep the instance
-	 * from runtime-suspending at all. The practical cost is nil for a
-	 * display that scans out continuously (fbcon).
+	 * The driver core resumes a parent to probe its children. The MSM8974
+	 * TrustZone-managed instance must not be resumed before its first
+	 * attach, so its runtime PM is only enabled once the context banks
+	 * are there.
 	 */
-	if (!qcom_iommu->nonsecure && dev->pm_domain)
-		pm_runtime_forbid(dev);
+	late_rpm = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
+	if (!late_rpm)
+		pm_runtime_enable(dev);
 
 	/* DEBUG (mdp-iommu bring-up): dump CB state 20 s after probe. */
 	INIT_DELAYED_WORK(&qcom_iommu->dbg_work, qcom_iommu_dbg_work);
@@ -1321,6 +1349,8 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 
 	/* register context bank devices, which are child nodes: */
 	ret = devm_of_platform_populate(dev);
+	if (late_rpm)
+		pm_runtime_enable(dev);
 	if (ret) {
 		dev_err(dev, "Failed to populate iommu contexts\n");
 		goto err_pm_disable;
