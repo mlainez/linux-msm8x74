@@ -30,6 +30,7 @@
 #include <linux/slab.h>
 #include <linux/extcon-provider.h>
 #include <linux/iio/consumer.h>
+#include <linux/reboot.h>
 #include <linux/regulator/driver.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
@@ -61,6 +62,7 @@
 #define SMBB_CHG_CFG		0x043
 #define SMBB_CHG_IMAX		0x044
 #define SMBB_CHG_ISAFE		0x045
+#define ISAFE_MASK		0x3f	/* the current, in the low six bits */
 #define SMBB_CHG_VIN_MIN	0x047
 #define SMBB_CHG_CTRL		0x049
 #define CTRL_EN			BIT(7)
@@ -145,6 +147,71 @@
 #define STATUS_CHG_FAST		BIT(7) /* Fast charging */
 #define STATUS_CHG_GONE		BIT(8) /* No charger is connected */
 
+/*
+ * Battery temperature, in millidegrees Celsius.
+ *
+ * The PMIC comparators only stop a cycle at the two ends of their window. In
+ * between, the vendor kernel charges a cool (below 10 C) or warm (from 45 C)
+ * battery at 350 mA to 4.10 V; charging at the full rate there plates lithium
+ * when cold and ages the cell when warm. The stops at 0 C and 55 C are a
+ * second layer under the comparators, whose thresholds are whatever the boot
+ * chain left. A reading at either end of the conversion table is a thermistor
+ * that is open or shorted, and a battery whose temperature is unknown is not
+ * charged.
+ */
+#define SMBB_TEMP_COLD_MC	0
+#define SMBB_TEMP_COOL_MC	10000
+#define SMBB_TEMP_WARM_MC	45000
+#define SMBB_TEMP_HOT_MC	55000
+#define SMBB_TEMP_HYST_MC	2000
+#define SMBB_TEMP_MIN_MC	(-30000)
+#define SMBB_TEMP_MAX_MC	90000
+#define SMBB_DERATED_IMAX_UA	350000
+#define SMBB_DERATED_VMAX_UV	4100000
+#define SMBB_RECHARGE_DELTA_UV	100000
+
+/*
+ * A cycle that does not end. The hardware end-of-charge detection is known to
+ * be inaccurate, and when it misses, the battery is held at the float voltage
+ * until the safety timer latches CHG_FAILED - which the supervisor clears, as
+ * it must for a slow supply that merely needs more than one timer period.
+ * Told apart by the battery voltage: at the float voltage a second period is
+ * not a slow charge, it is a cell being floated for as long as the cable
+ * stays in. Stop, and stay stopped until the input is plugged in again.
+ */
+#define SMBB_FLOAT_MARGIN_UV	50000
+#define SMBB_FLOAT_MAX_MS	(120 * 60 * 1000)
+/*
+ * Consecutive passes that have to agree before a stopped cycle resumes or the
+ * time spent at the float voltage is forgotten.
+ */
+#define SMBB_CONFIRM_PASSES	3
+/* ... and how far apart: passes run by interrupts come in bursts. */
+#define SMBB_CONFIRM_GAP_MS	4000
+
+/*
+ * Running from the battery. Nothing else in this kernel stops the phone before
+ * the PMIC undervoltage lockout, well under the 3.4 V at which the vendor
+ * kernel shuts down, and a lithium-ion cell is damaged by being run that low
+ * as a matter of routine. A reading under SMBB_VBAT_SANE_UV is an open sense
+ * line, not a cell.
+ */
+#define SMBB_VBAT_CUTOFF_UV	3400000
+#define SMBB_VBAT_SANE_UV	2000000
+#define SMBB_VBAT_LOW_COUNT	3
+#define SMBB_VBAT_LOW_POLL_MS	20000
+#define SMBB_VBAT_IDLE_POLL_MS	60000
+
+enum smbb_zone {
+	SMBB_ZONE_NORMAL,
+	SMBB_ZONE_COOL,
+	SMBB_ZONE_WARM,
+	/* no charging from here on */
+	SMBB_ZONE_COLD,
+	SMBB_ZONE_HOT,
+	SMBB_ZONE_UNKNOWN,
+};
+
 enum smbb_attr {
 	ATTR_BAT_ISAFE,
 	ATTR_BAT_IMAX,
@@ -156,6 +223,21 @@ enum smbb_attr {
 	ATTR_CHG_VDET,
 	ATTR_VIN_MIN,
 	_ATTR_CNT,
+};
+
+static enum power_supply_property smbb_battery_properties[] = {
+	POWER_SUPPLY_PROP_STATUS,
+	POWER_SUPPLY_PROP_HEALTH,
+	POWER_SUPPLY_PROP_PRESENT,
+	POWER_SUPPLY_PROP_CHARGE_TYPE,
+	POWER_SUPPLY_PROP_CURRENT_MAX,
+	POWER_SUPPLY_PROP_VOLTAGE_MAX,
+	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
+	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR,
+	/* the last two only with their ADC channel, see the probe */
+	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
 
 struct smbb_charger {
@@ -175,6 +257,17 @@ struct smbb_charger {
 	bool charging_disabled;
 	unsigned long status;
 	struct mutex statlock;
+	/*
+	 * Serialises everything that writes the charge path: the supervisor
+	 * against probe, whose SEC_ACCESS unlocks only cover the very next
+	 * write to the peripheral.
+	 */
+	struct mutex hwlock;
+	/*
+	 * The supervisor may neither run nor be queued: it is not set up yet,
+	 * or the device is going away. Written under hwlock.
+	 */
+	bool stopping;
 
 	/*
 	 * Engagement supervisor.  The hardware needs software to keep the
@@ -205,6 +298,7 @@ struct smbb_charger {
 	unsigned int collapse_count;
 	bool collapse_pending;
 	unsigned int rearm_delay_ms;	/* backoff between re-arm attempts */
+	unsigned long rearm_not_before;	/* jiffies: no CTRL_EN toggle earlier */
 
 	/*
 	 * Battery voltage, when the board provides it.  Without it the
@@ -213,13 +307,57 @@ struct smbb_charger {
 	 * a running cycle nor end-of-charge in that state.
 	 */
 	struct iio_channel *vbat_chan;
+	/* Battery thermistor: see enum smbb_zone. */
+	struct iio_channel *temp_chan;
+	enum smbb_zone zone;
+	int temp_mc;
+	unsigned long float_since;	/* jiffies, 0 when not at the float voltage */
+	unsigned int nofloat_count;	/* consecutive passes away from it */
+	unsigned long nofloat_last;	/* jiffies of the last one counted */
+	bool term_fault;		/* see SMBB_FLOAT_MAX_MS */
+	unsigned int resume_count;	/* consecutive readings under the recharge threshold */
+	unsigned long resume_last;	/* jiffies of the last one counted */
+	unsigned int low_count;		/* consecutive readings under the cut-off */
+	unsigned long low_last;		/* jiffies of the last counted reading */
+	unsigned int arb_stage;		/* reverse-boost response, see the supervisor */
+	unsigned long arb_until;	/* jiffies: end of the reverse-boost pause */
+	unsigned int temp_errors;	/* consecutive unusable thermistor readings */
+	bool force_rearm;		/* end the running cycle: its limits changed */
+	bool vmax_held;			/* float voltage not lowered: battery above it */
+	bool user_inhibit;		/* charge_behaviour is inhibit-charge */
+	/*
+	 * A battery is expected but not detected. Presence is sensed on the
+	 * thermistor line, so this is as likely a fitted pack whose thermistor
+	 * is open as a missing one: the charge path stays on, at the derated
+	 * limits. Follows the readings once two in a row disagree with it.
+	 */
+	bool absent;
+	unsigned int presence_flips;
+	unsigned long presence_last;	/* jiffies of the first disagreeing reading */
+	/*
+	 * The board has no battery and never will: a carrier board fed at the
+	 * battery terminals or from the input. Whatever the presence detection
+	 * says is then noise, and acting on it would switch off the charge
+	 * path that powers the board.
+	 */
+	bool no_battery;
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
+	/*
+	 * What the device tree allows. attr[] follows what is programmed,
+	 * which the driver lowers by itself; these are the most that userspace
+	 * may ask for.
+	 */
+	unsigned int dt_attr[_ATTR_CNT];
+	/* What userspace asked for, within dt_attr[]; restored after derating. */
+	unsigned int want_attr[_ATTR_CNT];
 
 	struct power_supply *usb_psy;
 	struct power_supply *dc_psy;
 	struct power_supply *bat_psy;
+	struct power_supply_desc bat_desc;
+	enum power_supply_property bat_props[ARRAY_SIZE(smbb_battery_properties)];
 	struct regmap *regmap;
 
 	struct regulator_desc otg_rdesc;
@@ -380,6 +518,8 @@ static int smbb_charger_attr_write(struct smbb_charger *chg,
 			return rc;
 		}
 
+		if (prop->safe_reg == SMBB_CHG_ISAFE)
+			wval &= ISAFE_MASK;
 		wval = prop->hw_fn(wval);
 
 		if (val > wval) {
@@ -425,6 +565,8 @@ static int smbb_charger_attr_read(struct smbb_charger *chg,
 		dev_err(chg->dev, "failed to read %s\n", prop->name);
 		return rc;
 	}
+	if (prop->reg == SMBB_CHG_ISAFE)
+		val &= ISAFE_MASK;
 	val = prop->hw_fn(val);
 	dev_dbg(chg->dev, "%s => %d\n", prop->name, val);
 
@@ -494,10 +636,15 @@ static void smbb_set_line_flag(struct smbb_charger *chg, int irq, int flag)
  * comparator simply keeps the buck off and the toggle is a no-op.
  */
 #define SMBB_ENGAGE_POLL_MS	10000
+#define SMBB_PRESENCE_POLL_MS	1000
 #define SMBB_REARM_SETTLE_MS	2000
 #define SMBB_REARM_MAX_MS	300000
 
-static void smbb_clear_gates(struct smbb_charger *chg)
+/*
+ * Returns whether the charge-failed latch was set. keep_force leaves
+ * CTRL_ON_BAT_FORCE alone: the reverse-boost pause sets it on purpose.
+ */
+static bool smbb_clear_gates(struct smbb_charger *chg, bool keep_force)
 {
 	static const struct {
 		unsigned int off, mask, val;
@@ -505,10 +652,13 @@ static void smbb_clear_gates(struct smbb_charger *chg)
 		{ SMBB_CHG_CTRL, CTRL_ON_BAT_FORCE, 0 },
 		{ SMBB_USB_SUSP, USB_SUSP_EN, 0 },
 	};
+	bool failed = false;
 	unsigned int reg;
 	int i, rc;
 
 	for (i = 0; i < ARRAY_SIZE(gates); ++i) {
+		if (keep_force && gates[i].mask == CTRL_ON_BAT_FORCE)
+			continue;
 		rc = regmap_read(chg->regmap, chg->addr + gates[i].off, &reg);
 		if (rc || !(reg & gates[i].mask))
 			continue;
@@ -526,7 +676,25 @@ static void smbb_clear_gates(struct smbb_charger *chg)
 			     CHG_FAILED_CLEAR);
 		chg->gate_clear_count++;
 		dev_info(chg->dev, "cleared the charge-failed latch\n");
+		failed = true;
 	}
+
+	return failed;
+}
+
+/*
+ * Is the OTG boost driving VBUS?  That bit is the kernel's own record of being
+ * in host mode: the USB controller asks for vbus-supply (chg_otg) when the ID
+ * pin says a peripheral is attached, and the boost then makes 5 V out of VPH -
+ * a LOAD on the supply, not a source.
+ */
+static bool smbb_otg_enabled(struct smbb_charger *chg)
+{
+	unsigned int val = 0;
+
+	regmap_read(chg->regmap, chg->addr + SMBB_USB_OTG_CTL, &val);
+
+	return val & OTG_CTL_EN;
 }
 
 /*
@@ -557,25 +725,17 @@ static void smbb_hw_state(struct smbb_charger *chg, bool *input,
 	if (usb & USB_RT_CHG_GONE)
 		usb &= ~USB_RT_VALID;
 
+	/*
+	 * Hosting: the 5 V on the connector is our own boost, made from the
+	 * battery. It is not an input, and nothing may try to charge from it.
+	 */
+	if (smbb_otg_enabled(chg))
+		usb &= ~USB_RT_VALID;
+
 	*input = (usb & USB_RT_VALID) || (dc & DC_RT_VALID);
 	*charging = *input && (chgr & (CHG_RT_FAST_ON | CHG_RT_TRKL_ON));
 	*bat_ready = (bat & BAT_RT_PRESENT) && (bat & BAT_RT_TEMP_OK);
 	*done = chgr & CHG_RT_CHG_DONE;
-}
-
-/*
- * Is the OTG boost driving VBUS?  That bit is the kernel's own record of being
- * in host mode: the USB controller asks for vbus-supply (chg_otg) when the ID
- * pin says a peripheral is attached, and the boost then makes 5 V out of VPH -
- * a LOAD on the supply, not a source.
- */
-static bool smbb_otg_enabled(struct smbb_charger *chg)
-{
-	unsigned int val = 0;
-
-	regmap_read(chg->regmap, chg->addr + SMBB_USB_OTG_CTL, &val);
-
-	return val & OTG_CTL_EN;
 }
 
 /*
@@ -612,9 +772,111 @@ static bool smbb_battery_present(struct smbb_charger *chg)
 {
 	unsigned int bat = 0;
 
+	if (chg->no_battery)
+		return false;
+
 	regmap_read(chg->regmap, chg->addr + SMBB_BAT_RT_STS, &bat);
 
 	return bat & BAT_RT_PRESENT;
+}
+
+/*
+ * One reading is not a verdict either way: the battery is taken for gone, or
+ * for back, on the second consecutive reading that says so. Returns true while
+ * a reading that disagrees awaits its confirmation. A board declared
+ * battery-less has nothing to debounce.
+ */
+static bool smbb_debounce_presence(struct smbb_charger *chg, bool reading)
+{
+	if (chg->no_battery)
+		return false;
+
+	if (reading == !chg->absent) {
+		chg->presence_flips = 0;
+		return false;
+	}
+	/* the second reading counts once the first has had time to settle */
+	if (chg->presence_flips &&
+	    time_before(jiffies, chg->presence_last +
+				 msecs_to_jiffies(SMBB_PRESENCE_POLL_MS / 2)))
+		return true;
+	if (!chg->presence_flips++) {
+		chg->presence_last = jiffies;
+		return true;
+	}
+
+	chg->presence_flips = 0;
+	chg->absent = !reading;
+	/* the counts are of consecutive passes that looked at the battery */
+	chg->resume_count = 0;
+	chg->nofloat_count = 0;
+	if (chg->absent) {
+		dev_warn(chg->dev,
+			 "battery not detected: charging at the reduced rate\n");
+	} else {
+		dev_info(chg->dev, "battery detected\n");
+		/* as for a change of zone: the limits are about to change */
+		chg->force_rearm = true;
+		chg->rearm_not_before = jiffies;
+	}
+	power_supply_changed(chg->bat_psy);
+
+	return false;
+}
+
+/*
+ * No stop is in force: not the board's, not one for temperature or for a
+ * cycle that did not end, not the user's. The supervisor and the shutdown set
+ * CTRL_EN under this and not otherwise, except on a board declared
+ * battery-less, where the charge path is the supply and only the board's own
+ * stop can be in force.
+ */
+static bool smbb_charge_permitted(struct smbb_charger *chg)
+{
+	return !chg->charging_disabled && chg->zone < SMBB_ZONE_COLD &&
+	       !chg->term_fault && !chg->user_inhibit;
+}
+
+/*
+ * Is there a battery to watch? One that is expected and not detected may
+ * still be what carries the system.
+ */
+static bool smbb_battery_carries(struct smbb_charger *chg, bool present)
+{
+	return present || chg->absent;
+}
+
+/*
+ * Count a pass towards a confirmation. A pass that follows the last counted
+ * one too closely is not counted; true once enough of them agree.
+ */
+static bool smbb_confirm(unsigned int *count, unsigned long *last)
+{
+	if (*count && time_before(jiffies,
+				  *last + msecs_to_jiffies(SMBB_CONFIRM_GAP_MS)))
+		return false;
+	*last = jiffies;
+
+	return ++*count >= SMBB_CONFIRM_PASSES;
+}
+
+/*
+ * No input at all, as opposed to one that smbb_hw_state() discounts: an input
+ * that collapsed keeps USB_RT_VALID next to CHG_GONE, and the OTG boost
+ * raises it by itself. A read that failed is not an answer.
+ */
+static bool smbb_input_removed(struct smbb_charger *chg)
+{
+	unsigned int usb, dc;
+
+	if (regmap_read(chg->regmap, chg->addr + SMBB_USB_RT_STS, &usb) ||
+	    (usb & USB_RT_VALID))
+		return false;
+	if (chg->dc_disabled)
+		return true;
+
+	return !regmap_read(chg->regmap, chg->addr + SMBB_DC_RT_STS, &dc) &&
+	       !(dc & DC_RT_VALID);
 }
 
 /* 500 mA: what a USB host port is required to supply, and the vendor's
@@ -693,18 +955,213 @@ static bool smbb_battery_full(struct smbb_charger *chg)
 	if (rc < 0)
 		return false;
 
-	return uv >= chg->attr[ATTR_CHG_VDET];
+	return uv >= (int)chg->attr[ATTR_CHG_VDET];
+}
+
+static void smbb_term_fault(struct smbb_charger *chg, const char *why)
+{
+	if (chg->term_fault)
+		return;
+
+	chg->term_fault = true;
+	chg->resume_count = 0;
+	dev_err(chg->dev,
+		"%s: the cycle did not end, not charging until the battery is under the recharge threshold\n",
+		why);
+	power_supply_changed(chg->bat_psy);
+}
+
+/*
+ * Watch a discharging battery. Returns the delay to the next look, 0 when
+ * there is nothing to watch.
+ */
+static unsigned int smbb_watch_low_battery(struct smbb_charger *chg,
+					   bool present)
+{
+	int uv;
+
+	if (!chg->vbat_chan || !present) {
+		chg->low_count = 0;
+		return 0;
+	}
+
+	if (iio_read_channel_processed(chg->vbat_chan, &uv) < 0) {
+		chg->low_count = 0;
+		return SMBB_VBAT_IDLE_POLL_MS;
+	}
+
+	if (uv < SMBB_VBAT_SANE_UV || uv >= SMBB_VBAT_CUTOFF_UV) {
+		chg->low_count = 0;
+		return uv < SMBB_VBAT_CUTOFF_UV + 200000 ?
+		       SMBB_VBAT_LOW_POLL_MS : SMBB_VBAT_IDLE_POLL_MS;
+	}
+
+	/*
+	 * Every charger interrupt runs a pass at once. Readings only count
+	 * when they are a poll period apart, or a burst of interrupts would
+	 * turn one sag into three.
+	 */
+	if (chg->low_count &&
+	    time_before(jiffies, chg->low_last +
+				 msecs_to_jiffies(SMBB_VBAT_LOW_POLL_MS) - HZ))
+		return SMBB_VBAT_LOW_POLL_MS;
+
+	chg->low_last = jiffies;
+	if (++chg->low_count >= SMBB_VBAT_LOW_COUNT) {
+		dev_emerg(chg->dev,
+			  "battery at %d uV, under the %d uV cut-off: powering off\n",
+			  uv, SMBB_VBAT_CUTOFF_UV);
+		orderly_poweroff(true);
+		return SMBB_VBAT_IDLE_POLL_MS;
+	}
+
+	return SMBB_VBAT_LOW_POLL_MS;
+}
+
+static const char * const smbb_zone_names[] = {
+	[SMBB_ZONE_NORMAL] = "in range",
+	[SMBB_ZONE_COOL] = "cool",
+	[SMBB_ZONE_WARM] = "warm",
+	[SMBB_ZONE_COLD] = "too cold",
+	[SMBB_ZONE_HOT] = "too hot",
+	[SMBB_ZONE_UNKNOWN] = "of unknown temperature",
+};
+
+static enum smbb_zone smbb_read_zone(struct smbb_charger *chg)
+{
+	int cold = SMBB_TEMP_COLD_MC, cool = SMBB_TEMP_COOL_MC;
+	int warm = SMBB_TEMP_WARM_MC, hot = SMBB_TEMP_HOT_MC;
+	int t, rc;
+
+	if (!chg->temp_chan)
+		return SMBB_ZONE_NORMAL;
+
+	rc = iio_read_channel_processed(chg->temp_chan, &t);
+	if (rc < 0 || t <= SMBB_TEMP_MIN_MC || t >= SMBB_TEMP_MAX_MC) {
+		/* one bad conversion is not a verdict, two in a row are */
+		if (++chg->temp_errors < 2)
+			return chg->zone;
+		return SMBB_ZONE_UNKNOWN;
+	}
+	chg->temp_errors = 0;
+	chg->temp_mc = t;
+
+	/* Leaving a zone takes SMBB_TEMP_HYST_MC more than entering it. */
+	if (chg->zone == SMBB_ZONE_COLD)
+		cold += SMBB_TEMP_HYST_MC;
+	if (chg->zone == SMBB_ZONE_COLD || chg->zone == SMBB_ZONE_COOL)
+		cool += SMBB_TEMP_HYST_MC;
+	if (chg->zone == SMBB_ZONE_HOT)
+		hot -= SMBB_TEMP_HYST_MC;
+	if (chg->zone == SMBB_ZONE_HOT || chg->zone == SMBB_ZONE_WARM)
+		warm -= SMBB_TEMP_HYST_MC;
+
+	if (t < cold)
+		return SMBB_ZONE_COLD;
+	if (t < cool)
+		return SMBB_ZONE_COOL;
+	if (t >= hot)
+		return SMBB_ZONE_HOT;
+	if (t >= warm)
+		return SMBB_ZONE_WARM;
+	return SMBB_ZONE_NORMAL;
+}
+
+/*
+ * Program the charge rate, float voltage and recharge threshold that go with
+ * the battery temperature and with what userspace asked for. Called on every
+ * pass: a write that failed is simply tried again.
+ *
+ * The recharge threshold follows the float voltage down. Left where it was it
+ * sits above a lowered float voltage, and the hardware would restart a cycle
+ * the moment one ended.
+ *
+ * The float voltage itself is never moved under a battery that sits above it.
+ * The buck would be asked to regulate below its own output, which is how
+ * reverse boost starts; the vendor leaves it alone until the battery has come
+ * down. The lower recharge threshold, and the end of the running cycle asked
+ * for when the write is first held back, keep the battery from being charged
+ * meanwhile. Asked for once: the battery may sit above the new float voltage
+ * for hours, and the path is not toggled on every pass of them.
+ *
+ * A battery that is not detected gets the limits of the cool and warm zones.
+ */
+static void smbb_apply_limits(struct smbb_charger *chg)
+{
+	unsigned int imax = chg->want_attr[ATTR_BAT_IMAX];
+	unsigned int vmax = chg->want_attr[ATTR_BAT_VMAX];
+	unsigned int vdet;
+	int uv;
+
+	if (chg->zone != SMBB_ZONE_NORMAL || chg->absent) {
+		imax = min(imax, SMBB_DERATED_IMAX_UA);
+		vmax = min(vmax, SMBB_DERATED_VMAX_UV);
+	}
+	vdet = min(chg->dt_attr[ATTR_CHG_VDET], vmax - SMBB_RECHARGE_DELTA_UV);
+	/* the register goes no lower */
+	vdet = max(vdet, smbb_charger_attrs[ATTR_CHG_VDET].min);
+
+	if (imax != chg->attr[ATTR_BAT_IMAX])
+		smbb_charger_attr_write(chg, ATTR_BAT_IMAX, imax);
+	if (vdet != chg->attr[ATTR_CHG_VDET])
+		smbb_charger_attr_write(chg, ATTR_CHG_VDET, vdet);
+
+	/* a battery whose voltage cannot be read may be above it */
+	if (vmax < chg->attr[ATTR_BAT_VMAX] && chg->vbat_chan &&
+	    (iio_read_channel_processed(chg->vbat_chan, &uv) < 0 ||
+	     uv >= (int)vmax)) {
+		if (!chg->vmax_held) {
+			chg->vmax_held = true;
+			chg->force_rearm = true;
+			chg->rearm_not_before = jiffies;
+		}
+		return;
+	}
+	chg->vmax_held = false;
+	if (vmax != chg->attr[ATTR_BAT_VMAX])
+		smbb_charger_attr_write(chg, ATTR_BAT_VMAX, vmax);
+}
+
+static void smbb_set_zone(struct smbb_charger *chg, enum smbb_zone zone)
+{
+	if (zone == chg->zone)
+		return;
+
+	if (zone == SMBB_ZONE_UNKNOWN)
+		dev_err(chg->dev,
+			"battery temperature unreadable: not charging\n");
+	else
+		dev_info(chg->dev, "battery %s at %d mC: %s\n",
+			 smbb_zone_names[zone], chg->temp_mc,
+			 zone >= SMBB_ZONE_COLD ? "not charging" :
+			 zone == SMBB_ZONE_NORMAL ? "charging at the full rate" :
+			 "charging at the reduced rate");
+	chg->zone = zone;
+	/* a cycle started under the old limits must not run on under the new */
+	chg->force_rearm = true;
+	chg->rearm_not_before = jiffies;
+	power_supply_changed(chg->bat_psy);
 }
 
 static void smbb_engage_work(struct work_struct *work)
 {
 	struct smbb_charger *chg = container_of(work, struct smbb_charger,
 						engage_work.work);
-	bool input, charging, bat_ready, done;
-	unsigned int delay = SMBB_ENGAGE_POLL_MS;
+	bool input, charging, bat_ready, done, failed, present, path_ok;
+	bool unsettled, arb_wait;
+	unsigned int delay = SMBB_ENGAGE_POLL_MS, low;
+	unsigned long now;
 	const char *mode;
 
+	guard(mutex)(&chg->hwlock);
+
+	if (chg->stopping)
+		return;
+
 	smbb_hw_state(chg, &input, &charging, &bat_ready, &done);
+	/* Read once: every decision of this pass is about the same battery. */
+	unsettled = smbb_debounce_presence(chg, smbb_battery_present(chg));
+	present = !chg->no_battery && !chg->absent;
 
 	/*
 	 * Announce how the board is powered whenever that changes.  On a
@@ -712,7 +1169,7 @@ static void smbb_engage_work(struct work_struct *work)
 	 * "VPH is fed at the terminals while we host a hub", which decides
 	 * which voltage is worth watching - and it is invisible otherwise.
 	 */
-	mode = smbb_supply_mode(chg, input, smbb_battery_present(chg));
+	mode = smbb_supply_mode(chg, input, present);
 	if (mode != chg->supply_mode) {
 		chg->supply_mode = mode;
 		/*
@@ -731,6 +1188,21 @@ static void smbb_engage_work(struct work_struct *work)
 	}
 
 	/*
+	 * One reading against what the battery was taken for decides nothing:
+	 * no state is touched and nothing is written until the next reading
+	 * confirms it or takes it back.
+	 */
+	if (unsettled) {
+		schedule_delayed_work(&chg->engage_work,
+				      msecs_to_jiffies(SMBB_PRESENCE_POLL_MS));
+		return;
+	}
+
+	/* The reverse-boost pause is judged once: the pass takes time. */
+	now = jiffies;
+	arb_wait = chg->arb_stage == 1 && time_before(now, chg->arb_until);
+
+	/*
 	 * Clear the sticky gates BEFORE deciding whether an input is present.
 	 * smbb_hw_state() deliberately treats a latched CHG_GONE as cancelling
 	 * USB_RT_VALID, because this hardware leaves stale valid/fast bits set
@@ -742,7 +1214,7 @@ static void smbb_engage_work(struct work_struct *work)
 	 * no battery that is fatal: measured on the carrier rig, boot reset with
 	 * "input collapsed at 100000 uA" moments after g_ether enumerated.
 	 */
-	smbb_clear_gates(chg);
+	failed = smbb_clear_gates(chg, arb_wait);
 
 	if (!input) {
 		/*
@@ -752,7 +1224,19 @@ static void smbb_engage_work(struct work_struct *work)
 		chg->iusb_learn_idx = chg->iusb_max_idx;
 		chg->collapse_pending = false;
 		chg->rearm_delay_ms = SMBB_ENGAGE_POLL_MS;
+		chg->rearm_not_before = jiffies;
 		chg->rearm_stage = 0;
+		/*
+		 * A stopped cycle stays stopped until the input is plugged in
+		 * again, which takes it to have been removed.
+		 */
+		if (smbb_input_removed(chg)) {
+			chg->float_since = 0;
+			chg->term_fault = false;
+		}
+		/* no reading of the battery in this pass */
+		chg->resume_count = 0;
+		chg->nofloat_count = 0;
 		/*
 		 * ... but only when there is a battery to fall back on.  With no
 		 * cell, this input is what powers the SoC: if it really is gone
@@ -760,13 +1244,145 @@ static void smbb_engage_work(struct work_struct *work)
 		 * CHG_GONE latch above) then lowering the limit is what kills
 		 * it.  Leave the limit alone and let the next pass re-evaluate.
 		 */
-		if (smbb_battery_present(chg))
+		if (present)
 			smbb_set_iusb(chg, chg->iusb_floor_idx);
 		if (chg->was_charging) {
 			dev_dbg(chg->dev, "input gone, supervisor idle\n");
 			chg->was_charging = false;
 		}
-		return;	/* an insertion IRQ reschedules us */
+		/*
+		 * Reverse boost. Hardware termination of it is switched off in
+		 * the setup table, as the vendor does, which leaves the response
+		 * to software: with the input gone but the buck still running -
+		 * USB_RT_VALID stays set next to CHG_GONE - it runs backwards
+		 * from the battery and holds the input pin up. The vendor
+		 * switches charging off and forces the system onto the battery
+		 * for a second, then re-enables charging; do that, once per
+		 * removal. The pause holds against its deadline: its own
+		 * interrupts run passes that must not end it early.
+		 */
+		if (present && !smbb_otg_enabled(chg)) {
+			unsigned int usb = 0;
+
+			regmap_read(chg->regmap, chg->addr + SMBB_USB_RT_STS,
+				    &usb);
+			if (chg->arb_stage == 1) {
+				if (arb_wait) {
+					schedule_delayed_work(&chg->engage_work,
+							      chg->arb_until - now);
+					return;
+				}
+				/* the force went with the gates above */
+				if (smbb_charge_permitted(chg))
+					regmap_update_bits(chg->regmap,
+							   chg->addr + SMBB_CHG_CTRL,
+							   CTRL_EN, CTRL_EN);
+				chg->arb_stage = 2;
+			} else if (!chg->arb_stage &&
+				   (usb & USB_RT_CHG_GONE) &&
+				   (usb & USB_RT_VALID)) {
+				dev_info(chg->dev,
+					 "input gone with the charger still running: pausing it\n");
+				regmap_update_bits(chg->regmap,
+						   chg->addr + SMBB_CHG_CTRL,
+						   CTRL_EN | CTRL_ON_BAT_FORCE,
+						   CTRL_ON_BAT_FORCE);
+				chg->arb_stage = 1;
+				chg->arb_until = jiffies + HZ;
+				schedule_delayed_work(&chg->engage_work, HZ);
+				return;
+			}
+		}
+
+		/* An insertion interrupt brings us back sooner than this. */
+		low = smbb_watch_low_battery(chg,
+					     smbb_battery_carries(chg, present));
+		if (low)
+			schedule_delayed_work(&chg->engage_work,
+					      msecs_to_jiffies(low));
+		return;
+	}
+
+	/* An input that came back inside the pause ends it. */
+	if (chg->arb_stage == 1)
+		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				   CTRL_ON_BAT_FORCE, 0);
+	chg->arb_stage = 0;
+
+	/*
+	 * Battery temperature, before anything below can arm the path. Only
+	 * for a detected battery: without one the thermistor line is open.
+	 */
+	if (present) {
+		bool vbat_ok, at_float;
+		int uv = 0;
+
+		smbb_set_zone(chg, smbb_read_zone(chg));
+		smbb_apply_limits(chg);
+
+		/*
+		 * One reading for what follows. One that failed says nothing:
+		 * it neither lifts a stop nor forgets the time at float.
+		 */
+		vbat_ok = chg->vbat_chan &&
+			  iio_read_channel_processed(chg->vbat_chan, &uv) >= 0;
+		at_float = vbat_ok && uv >= (int)chg->attr[ATTR_BAT_VMAX] -
+					    SMBB_FLOAT_MARGIN_UV;
+
+		/*
+		 * A stopped cycle may start again once the battery has come
+		 * down under the recharge threshold, like one the hardware
+		 * ended by itself.
+		 */
+		if (chg->term_fault) {
+			if (!vbat_ok || uv >= (int)chg->attr[ATTR_CHG_VDET]) {
+				chg->resume_count = 0;
+			} else if (smbb_confirm(&chg->resume_count,
+						&chg->resume_last)) {
+				chg->term_fault = false;
+				chg->float_since = 0;
+				chg->resume_count = 0;
+				chg->nofloat_count = 0;
+				chg->rearm_not_before = jiffies;
+				dev_info(chg->dev,
+					 "battery under the recharge threshold: charging again\n");
+				power_supply_changed(chg->bat_psy);
+			}
+		}
+
+		if (charging && !done && at_float) {
+			chg->nofloat_count = 0;
+			if (failed)
+				smbb_term_fault(chg, "safety timer at the float voltage");
+			else if (!chg->float_since)
+				chg->float_since = jiffies ?: 1;
+			else if (time_after(jiffies, chg->float_since +
+					    msecs_to_jiffies(SMBB_FLOAT_MAX_MS)))
+				smbb_term_fault(chg, "two hours at the float voltage");
+		} else if (failed && at_float) {
+			smbb_term_fault(chg, "safety timer at the float voltage");
+		} else if (failed && chg->vbat_chan && !vbat_ok) {
+			smbb_term_fault(chg, "safety timer with the battery voltage unreadable");
+		} else if (charging && !done && !vbat_ok) {
+			/* a cycle runs and its voltage is unknown */
+			chg->nofloat_count = 0;
+		} else if (smbb_confirm(&chg->nofloat_count,
+					&chg->nofloat_last)) {
+			/* no cycle, or one under the float voltage, for long enough */
+			chg->float_since = 0;
+			chg->nofloat_count = 0;
+		}
+
+		path_ok = bat_ready && smbb_charge_permitted(chg);
+	} else {
+		if (chg->absent)
+			smbb_apply_limits(chg);
+		/*
+		 * The path is the supply of a board without a battery. Where
+		 * one is expected, a stop outlasts its not being detected:
+		 * the path was off when it went, and the board runs.
+		 */
+		path_ok = chg->no_battery || smbb_charge_permitted(chg);
 	}
 
 	if (charging != chg->was_charging) {
@@ -775,6 +1391,7 @@ static void smbb_engage_work(struct work_struct *work)
 		chg->was_charging = charging;
 		/* a state change is a fresh opportunity: retry promptly again */
 		chg->rearm_delay_ms = SMBB_ENGAGE_POLL_MS;
+		chg->rearm_not_before = jiffies;
 	}
 
 	/*
@@ -802,7 +1419,7 @@ static void smbb_engage_work(struct work_struct *work)
 		 * rig-envelope, which throttles on this collapse count); getting
 		 * the input to stay up is this driver's.
 		 */
-		if (!smbb_battery_present(chg)) {
+		if (!present) {
 			/*
 			 * See the probe comment: with no cell the limit is the
 			 * system's budget and lowering it starves the load that
@@ -826,9 +1443,8 @@ static void smbb_engage_work(struct work_struct *work)
 					msecs_to_jiffies(SMBB_AICL_STEP_MS))) {
 		/*
 		 * Holding up under the current draw: ask for one step more.
-		 * With no battery there is no charge cycle to gate this on, and
-		 * the ramp still matters - it is the SoC's budget - so the test
-		 * is "not collapsing" rather than "charging".
+		 * Only a running cycle ramps the limit. Without one - a board
+		 * with no battery, typically - it stays where it is.
 		 */
 		chg->last_ramp = jiffies;
 		smbb_set_iusb(chg, chg->iusb_idx + 1);
@@ -836,10 +1452,13 @@ static void smbb_engage_work(struct work_struct *work)
 
 	switch (chg->rearm_stage) {
 	case 1:
+		chg->rearm_stage = 0;
+		/* a stop that arrived during the settling delay stands */
+		if (!path_ok)
+			break;
 		/* settling delay elapsed: bring CTRL_EN back up */
 		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
 				   CTRL_EN, CTRL_EN);
-		chg->rearm_stage = 0;
 		chg->rearm_count++;
 		dev_dbg(chg->dev, "re-arm complete (%u total)\n",
 			chg->rearm_count);
@@ -851,7 +1470,12 @@ static void smbb_engage_work(struct work_struct *work)
 		 */
 		chg->rearm_delay_ms = min(chg->rearm_delay_ms * 3,
 					  SMBB_REARM_MAX_MS);
-		delay = chg->rearm_delay_ms;
+		/*
+		 * Only the toggle backs off. The pass itself keeps its period:
+		 * it is also what watches the battery temperature.
+		 */
+		chg->rearm_not_before = jiffies +
+					msecs_to_jiffies(chg->rearm_delay_ms);
 		break;
 	default:
 		/*
@@ -863,7 +1487,7 @@ static void smbb_engage_work(struct work_struct *work)
 		 * the vendor does (it re-arms once at end of charge and then
 		 * waits on the comparator).
 		 */
-		if (!smbb_battery_present(chg)) {
+		if (!present) {
 			/*
 			 * No battery at all, but an input is present.  Keep the
 			 * path ARMED: on this PMIC the input reaches VPH through
@@ -902,21 +1526,26 @@ static void smbb_engage_work(struct work_struct *work)
 			 * supply can hold and the ramp walks up from there, one
 			 * settled step at a time.  This branch's job is only to
 			 * keep the path armed.
+			 *
+			 * Where a battery is expected and merely not detected,
+			 * a stop in force stands: CTRL_EN is left as it is.
 			 */
-			regmap_update_bits(chg->regmap,
-					   chg->addr + SMBB_CHG_CTRL,
-					   CTRL_EN, CTRL_EN);
-			if (!chg->no_batt_reported) {
+			if (path_ok)
+				regmap_update_bits(chg->regmap,
+						   chg->addr + SMBB_CHG_CTRL,
+						   CTRL_EN, CTRL_EN);
+			if (path_ok && !chg->no_batt_reported) {
 				dev_info(chg->dev,
 					 "no battery present: powering the system from the input\n");
 				chg->no_batt_reported = true;
 			}
 			break;
 		}
-		if (!bat_ready) {
+		if (!path_ok) {
 			/*
 			 * A battery IS fitted but is not ready - on this
-			 * hardware that means outside its temperature window.
+			 * hardware that means outside its temperature window -
+			 * or a stop is in force.
 			 * Never arm the path for it, and never re-arm below
 			 * either: charging a cell out of range is exactly what
 			 * the temperature qualifier exists to prevent.  (Until
@@ -930,12 +1559,17 @@ static void smbb_engage_work(struct work_struct *work)
 					   CTRL_EN, 0);
 			break;
 		}
-		if (charging || done || smbb_battery_full(chg)) {
+		if (!chg->force_rearm &&
+		    (charging || done || smbb_battery_full(chg))) {
 			regmap_update_bits(chg->regmap,
 					   chg->addr + SMBB_CHG_CTRL,
 					   CTRL_EN, CTRL_EN);
 			break;
 		}
+		if (!chg->force_rearm &&
+		    time_before(jiffies, chg->rearm_not_before))
+			break;
+		chg->force_rearm = false;
 		/*
 		 * Input present, battery present and in range, yet no cycle:
 		 * drop CTRL_EN so the next pass raises it, clearing any
@@ -948,12 +1582,22 @@ static void smbb_engage_work(struct work_struct *work)
 		break;
 	}
 
+	/*
+	 * An input does not mean the battery is gaining: stopped for
+	 * temperature or a fault, the path is off and the battery may be
+	 * carrying the system.
+	 */
+	low = smbb_watch_low_battery(chg, !charging &&
+				     smbb_battery_carries(chg, present));
+	if (low)
+		delay = min(delay, low);
+
 	schedule_delayed_work(&chg->engage_work, msecs_to_jiffies(delay));
 }
 
 static void smbb_engage_kick(struct smbb_charger *chg)
 {
-	if (chg->dev)
+	if (chg->dev && !READ_ONCE(chg->stopping))
 		mod_delayed_work(system_wq, &chg->engage_work, 0);
 }
 
@@ -1003,6 +1647,7 @@ static irqreturn_t smbb_bat_temp_handler(int irq, void *_data)
 	mutex_unlock(&chg->statlock);
 
 	power_supply_changed(chg->bat_psy);
+	smbb_engage_kick(chg);
 	return IRQ_HANDLED;
 }
 
@@ -1012,6 +1657,7 @@ static irqreturn_t smbb_bat_present_handler(int irq, void *_data)
 
 	smbb_set_line_flag(chg, irq, STATUS_BAT_PRESENT);
 	power_supply_changed(chg->bat_psy);
+	smbb_engage_kick(chg);
 
 	return IRQ_HANDLED;
 }
@@ -1058,6 +1704,8 @@ static irqreturn_t smbb_chg_fast_handler(int irq, void *_data)
 
 	smbb_set_line_flag(chg, irq, STATUS_CHG_FAST);
 	power_supply_changed(chg->bat_psy);
+	/* a cycle that starts is held to the battery's zone at once */
+	smbb_engage_kick(chg);
 
 	return IRQ_HANDLED;
 }
@@ -1068,6 +1716,7 @@ static irqreturn_t smbb_chg_trkl_handler(int irq, void *_data)
 
 	smbb_set_line_flag(chg, irq, STATUS_CHG_TRKL);
 	power_supply_changed(chg->bat_psy);
+	smbb_engage_kick(chg);
 
 	return IRQ_HANDLED;
 }
@@ -1104,7 +1753,7 @@ static int smbb_usbin_get_property(struct power_supply *psy,
 		val->intval = chg->attr[ATTR_USBIN_IMAX];
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
-		val->intval = 2500000;
+		val->intval = chg->dt_attr[ATTR_USBIN_IMAX];
 		break;
 	default:
 		rc = -EINVAL;
@@ -1122,10 +1771,32 @@ static int smbb_usbin_set_property(struct power_supply *psy,
 	int rc;
 
 	switch (psp) {
-	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
-		rc = smbb_charger_attr_write(chg, ATTR_USBIN_IMAX,
-				val->intval);
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT: {
+		unsigned int idx;
+
+		if (val->intval < smbb_charger_attrs[ATTR_USBIN_IMAX].min ||
+		    val->intval > chg->dt_attr[ATTR_USBIN_IMAX])
+			return -EINVAL;
+		/*
+		 * A ceiling for the adaptive limit, not a value to program:
+		 * going up, the limit still has to be reached one settled step
+		 * at a time. What was learned from a collapse is forgotten;
+		 * the ramp finds it again if it still holds.
+		 */
+		idx = smbb_hw_lookup(val->intval, smbb_imax_fn);
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->iusb_max_idx = idx;
+			chg->iusb_learn_idx = idx;
+			chg->iusb_floor_idx =
+				min(smbb_hw_lookup(SMBB_IUSB_FLOOR_UA,
+						   smbb_imax_fn), idx);
+			if (chg->iusb_idx > idx)
+				smbb_set_iusb(chg, idx);
+			chg->attr[ATTR_USBIN_IMAX] = smbb_imax_fn(idx);
+		}
+		rc = 0;
 		break;
+	}
 	default:
 		rc = -EINVAL;
 		break;
@@ -1152,7 +1823,7 @@ static int smbb_dcin_get_property(struct power_supply *psy,
 		val->intval = chg->attr[ATTR_DCIN_IMAX];
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
-		val->intval = 2500000;
+		val->intval = chg->dt_attr[ATTR_DCIN_IMAX];
 		break;
 	default:
 		rc = -EINVAL;
@@ -1171,6 +1842,8 @@ static int smbb_dcin_set_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		if (val->intval > chg->dt_attr[ATTR_DCIN_IMAX])
+			return -EINVAL;
 		rc = smbb_charger_attr_write(chg, ATTR_DCIN_IMAX,
 				val->intval);
 		break;
@@ -1216,12 +1889,43 @@ static int smbb_battery_get_property(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
-		if (status & STATUS_BAT_OK)
-			val->intval = POWER_SUPPLY_HEALTH_GOOD;
-		else if (status & STATUS_BAT_HOT)
+		if (chg->absent)
+			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+		else if (chg->term_fault)
+			val->intval = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
+		else if (chg->zone == SMBB_ZONE_UNKNOWN)
+			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+		else if (chg->zone == SMBB_ZONE_HOT)
 			val->intval = POWER_SUPPLY_HEALTH_OVERHEAT;
-		else
+		else if (chg->zone == SMBB_ZONE_COLD)
 			val->intval = POWER_SUPPLY_HEALTH_COLD;
+		else if (!(status & STATUS_BAT_OK))
+			val->intval = status & STATUS_BAT_HOT ?
+				      POWER_SUPPLY_HEALTH_OVERHEAT :
+				      POWER_SUPPLY_HEALTH_COLD;
+		else if (chg->zone == SMBB_ZONE_WARM)
+			val->intval = POWER_SUPPLY_HEALTH_WARM;
+		else if (chg->zone == SMBB_ZONE_COOL)
+			val->intval = POWER_SUPPLY_HEALTH_COOL;
+		else
+			val->intval = POWER_SUPPLY_HEALTH_GOOD;
+		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		if (!chg->vbat_chan)
+			return -ENODATA;
+		rc = iio_read_channel_processed(chg->vbat_chan, &val->intval);
+		if (rc < 0)
+			return rc;
+		rc = 0;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		if (!chg->temp_chan)
+			return -ENODATA;
+		rc = iio_read_channel_processed(chg->temp_chan, &val->intval);
+		if (rc < 0)
+			return rc;
+		val->intval /= 100;	/* tenths of a degree */
+		rc = 0;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		if (status & STATUS_CHG_FAST)
@@ -1248,7 +1952,12 @@ static int smbb_battery_get_property(struct power_supply *psy,
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
-		val->intval = 3000000; /* single-cell li-ion low end */
+		val->intval = SMBB_VBAT_CUTOFF_UV;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+		val->intval = chg->user_inhibit ?
+			      POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE :
+			      POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO;
 		break;
 	default:
 		rc = -EINVAL;
@@ -1256,6 +1965,41 @@ static int smbb_battery_get_property(struct power_supply *psy,
 	}
 
 	return rc;
+}
+
+/*
+ * The user's stop. It holds until the user lifts it: nothing sets CTRL_EN
+ * while it is in force. Refused where the charge path is the supply.
+ */
+static int smbb_set_charge_behaviour(struct smbb_charger *chg, int behaviour)
+{
+	bool was;
+	int rc;
+
+	switch (behaviour) {
+	case POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO:
+		scoped_guard(mutex, &chg->hwlock) {
+			was = chg->user_inhibit;
+			chg->user_inhibit = false;
+		}
+		if (was)
+			smbb_engage_kick(chg);
+		return 0;
+	case POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE:
+		if (chg->no_battery)
+			return -EOPNOTSUPP;
+		/* set even if the write fails: the next pass writes it again */
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->user_inhibit = true;
+			rc = regmap_update_bits(chg->regmap,
+						chg->addr + SMBB_CHG_CTRL,
+						CTRL_EN, 0);
+		}
+		smbb_engage_kick(chg);
+		return rc;
+	default:
+		return -EINVAL;
+	}
 }
 
 static int smbb_battery_set_property(struct power_supply *psy,
@@ -1267,10 +2011,30 @@ static int smbb_battery_set_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		rc = smbb_charger_attr_write(chg, ATTR_BAT_IMAX, val->intval);
+		if (val->intval < smbb_charger_attrs[ATTR_BAT_IMAX].min ||
+		    val->intval > chg->dt_attr[ATTR_BAT_IMAX])
+			return -EINVAL;
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->want_attr[ATTR_BAT_IMAX] = val->intval;
+			smbb_apply_limits(chg);
+		}
+		smbb_engage_kick(chg);
+		rc = 0;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
-		rc = smbb_charger_attr_write(chg, ATTR_BAT_VMAX, val->intval);
+		if (val->intval < smbb_charger_attrs[ATTR_BAT_VMAX].min ||
+		    val->intval > chg->dt_attr[ATTR_BAT_VMAX])
+			return -EINVAL;
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->want_attr[ATTR_BAT_VMAX] = val->intval;
+			smbb_apply_limits(chg);
+		}
+		/* a cycle running towards the old float voltage ends now */
+		smbb_engage_kick(chg);
+		rc = 0;
+		break;
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
+		rc = smbb_set_charge_behaviour(chg, val->intval);
 		break;
 	default:
 		rc = -EINVAL;
@@ -1286,6 +2050,7 @@ static int smbb_battery_writable_property(struct power_supply *psy,
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
+	case POWER_SUPPLY_PROP_CHARGE_BEHAVIOUR:
 		return 1;
 	default:
 		return 0;
@@ -1296,17 +2061,6 @@ static enum power_supply_property smbb_charger_properties[] = {
 	POWER_SUPPLY_PROP_ONLINE,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT,
 	POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX,
-};
-
-static enum power_supply_property smbb_battery_properties[] = {
-	POWER_SUPPLY_PROP_STATUS,
-	POWER_SUPPLY_PROP_HEALTH,
-	POWER_SUPPLY_PROP_PRESENT,
-	POWER_SUPPLY_PROP_CHARGE_TYPE,
-	POWER_SUPPLY_PROP_CURRENT_MAX,
-	POWER_SUPPLY_PROP_VOLTAGE_MAX,
-	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
-	POWER_SUPPLY_PROP_TECHNOLOGY,
 };
 
 static const struct reg_off_mask_default {
@@ -1423,6 +2177,8 @@ static const struct {
 	{ "chg_ctrl",     SMBB_CHG_CTRL },
 	{ "chg_failed",   SMBB_CHG_FAILED },
 	{ "vmax",         SMBB_CHG_VMAX },
+	{ "vsafe",        SMBB_CHG_VSAFE },
+	{ "isafe",        SMBB_CHG_ISAFE },
 	{ "vbat_det",     SMBB_CHG_VBAT_DET },
 	{ "ibat_max",     SMBB_CHG_IMAX },
 	{ "vin_min",      SMBB_CHG_VIN_MIN },
@@ -1467,6 +2223,8 @@ static int smbb_state_show(struct seq_file *s, void *data)
 				    !!(status & STATUS_BAT_PRESENT)));
 	if (chg->charging_disabled)
 		seq_puts(s, "charging      DISABLED by device tree\n");
+	seq_printf(s, "flags         user_inhibit=%d battery_not_detected=%d\n",
+		   chg->user_inhibit, chg->absent);
 	seq_printf(s, "supervisor    rearms=%u gate_clears=%u stage=%u backoff=%ums\n",
 		   chg->rearm_count, chg->gate_clear_count, chg->rearm_stage,
 		   chg->rearm_delay_ms);
@@ -1489,6 +2247,14 @@ static int smbb_state_show(struct seq_file *s, void *data)
 	} else {
 		seq_puts(s, "battery       no voltage channel\n");
 	}
+	if (chg->temp_chan)
+		seq_printf(s, "temperature   %d mC, battery %s\n", chg->temp_mc,
+			   smbb_zone_names[chg->zone]);
+	else
+		seq_puts(s, "temperature   no thermistor channel\n");
+	seq_printf(s, "termination   fault=%d at_float_for=%us\n", chg->term_fault,
+		   chg->float_since ?
+		   jiffies_to_msecs(jiffies - chg->float_since) / 1000 : 0);
 	seq_printf(s, "input limit   %u uA (floor %u, ceiling %u, learned %u, collapses %u)\n",
 		   smbb_imax_fn(chg->iusb_idx),
 		   smbb_imax_fn(chg->iusb_floor_idx),
@@ -1524,6 +2290,8 @@ static char *smbb_bif[] = { "smbb-bif" };
 static const struct power_supply_desc bat_psy_desc = {
 	.name = "smbb-bif",
 	.type = POWER_SUPPLY_TYPE_BATTERY,
+	.charge_behaviours = BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO) |
+			     BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_INHIBIT_CHARGE),
 	.properties = smbb_battery_properties,
 	.num_properties = ARRAY_SIZE(smbb_battery_properties),
 	.get_property = smbb_battery_get_property,
@@ -1610,34 +2378,9 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->dev = &pdev->dev;
 	mutex_init(&chg->statlock);
-
-	/*
-	 * Optional: a battery-voltage channel lets the supervisor recognise a
-	 * full battery instead of retrying against the recharge comparator.
-	 *
-	 * Its provider may not be bound yet. Defer here, before anything is
-	 * registered or written: the interrupt handlers below start the
-	 * supervisor, which drives the charge path enable, and on a board
-	 * without a battery that path is the system supply.
-	 */
-	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
-	if (IS_ERR(chg->vbat_chan)) {
-		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
-		chg->vbat_chan = NULL;
-	}
-
-	/*
-	 * The supervisor requeues itself and is kicked from the interrupt
-	 * handlers: it must not outlive chg on a failed probe or an unbind.
-	 * Registered before the interrupts, so it is cancelled after they are
-	 * released.
-	 */
-	rc = devm_delayed_work_autocancel(&pdev->dev, &chg->engage_work,
-					  smbb_engage_work);
-	if (rc)
-		return rc;
+	mutex_init(&chg->hwlock);
+	/* the battery supply takes writes that kick the supervisor */
+	chg->stopping = true;
 
 	chg->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chg->regmap) {
@@ -1665,6 +2408,8 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	dev_info(&pdev->dev, "Initializing SMBB rev %u", chg->revision);
 
 	chg->dc_disabled = of_property_read_bool(pdev->dev.of_node, "qcom,disable-dc");
+	chg->no_battery = of_property_read_bool(pdev->dev.of_node,
+						"qcom,no-battery");
 
 	for (i = 0; i < _ATTR_CNT; ++i) {
 		rc = smbb_charger_attr_parse(chg, i);
@@ -1673,11 +2418,81 @@ static int smbb_charger_probe(struct platform_device *pdev)
 			return rc;
 		}
 	}
+	memcpy(chg->dt_attr, chg->attr, sizeof(chg->dt_attr));
+	memcpy(chg->want_attr, chg->attr, sizeof(chg->want_attr));
+
+	/*
+	 * The safety ceilings lock once the boot chain has declared itself
+	 * done, so the values in force may not be the ones asked for above.
+	 * They bound everything else: read them back and say so.
+	 */
+	smbb_charger_attr_read(chg, ATTR_BAT_VSAFE);
+	smbb_charger_attr_read(chg, ATTR_BAT_ISAFE);
+	dev_info(&pdev->dev,
+		 "charging to %u uV at %u uA, hardware ceilings %u uV and %u uA\n",
+		 chg->attr[ATTR_BAT_VMAX], chg->attr[ATTR_BAT_IMAX],
+		 chg->attr[ATTR_BAT_VSAFE], chg->attr[ATTR_BAT_ISAFE]);
+	if (chg->attr[ATTR_BAT_VSAFE] > chg->dt_attr[ATTR_BAT_VSAFE] ||
+	    chg->attr[ATTR_BAT_ISAFE] > chg->dt_attr[ATTR_BAT_ISAFE])
+		dev_warn(&pdev->dev,
+			 "hardware ceilings are above the configured %u uV and %u uA\n",
+			 chg->dt_attr[ATTR_BAT_VSAFE],
+			 chg->dt_attr[ATTR_BAT_ISAFE]);
+
+	/*
+	 * Optional: a battery-voltage channel lets the supervisor recognise a
+	 * full battery instead of retrying against the recharge comparator.
+	 *
+	 * Its provider may not be bound yet. Defer here, before anything is
+	 * registered: the interrupt handlers below start the supervisor, which
+	 * drives the charge path enable, and on a board without a battery that
+	 * path is the system supply. The limits above are already programmed,
+	 * so the charger does not sit on the boot chain's values meanwhile.
+	 */
+	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
+	if (IS_ERR(chg->vbat_chan)) {
+		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
+		chg->vbat_chan = NULL;
+	}
+
+	/*
+	 * Optional as well: the battery thermistor, for the temperature window
+	 * described at enum smbb_zone. A board that does not wire it up keeps
+	 * relying on the PMIC comparators alone.
+	 */
+	chg->temp_chan = devm_iio_channel_get(&pdev->dev, "batt-therm");
+	if (IS_ERR(chg->temp_chan)) {
+		/*
+		 * Not described is the only way to have none. A thermistor
+		 * that is described and cannot be had must not turn into
+		 * charging without the temperature window.
+		 */
+		if (PTR_ERR(chg->temp_chan) != -ENODEV)
+			return dev_err_probe(&pdev->dev, PTR_ERR(chg->temp_chan),
+					     "failed to get the batt-therm channel\n");
+		chg->temp_chan = NULL;
+	}
 
 	bat_cfg.drv_data = chg;
 	bat_cfg.of_node = pdev->dev.of_node;
+	chg->bat_desc = bat_psy_desc;
+	if (chg->no_battery)
+		chg->bat_desc.charge_behaviours =
+			BIT(POWER_SUPPLY_CHARGE_BEHAVIOUR_AUTO);
+	chg->bat_desc.properties = chg->bat_props;
+	chg->bat_desc.num_properties = 0;
+	for (i = 0; i < ARRAY_SIZE(smbb_battery_properties); ++i) {
+		enum power_supply_property psp = smbb_battery_properties[i];
+
+		if ((psp == POWER_SUPPLY_PROP_TEMP && !chg->temp_chan) ||
+		    (psp == POWER_SUPPLY_PROP_VOLTAGE_NOW && !chg->vbat_chan))
+			continue;
+		chg->bat_props[chg->bat_desc.num_properties++] = psp;
+	}
 	chg->bat_psy = devm_power_supply_register(&pdev->dev,
-						  &bat_psy_desc,
+						  &chg->bat_desc,
 						  &bat_cfg);
 	if (IS_ERR(chg->bat_psy)) {
 		dev_err(&pdev->dev, "failed to register battery\n");
@@ -1745,6 +2560,7 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	chg->iusb_learn_idx = chg->iusb_max_idx;
 	chg->iusb_idx = chg->iusb_max_idx + 1;	/* force the first write */
 	chg->rearm_delay_ms = SMBB_ENGAGE_POLL_MS;
+	chg->rearm_not_before = jiffies;
 	chg->last_ramp = jiffies;
 
 	/*
@@ -1784,6 +2600,88 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		smbb_set_iusb(chg, chg->iusb_floor_idx);
 	}
 
+	/*
+	 * The supervisor requeues itself and is kicked from the interrupt
+	 * handlers: it must not outlive chg on a failed probe or an unbind.
+	 * Registered before the interrupts, so it is cancelled after they are
+	 * released, and after the ADC channels and power supplies it uses, so
+	 * it is cancelled before those go.
+	 */
+	rc = devm_delayed_work_autocancel(&pdev->dev, &chg->engage_work,
+					  smbb_engage_work);
+	if (rc)
+		return rc;
+
+	/*
+	 * Everything below writes the charge path, and the interrupt handlers
+	 * registered further down start the supervisor: keep it out until the
+	 * path is fully set up.
+	 */
+	guard(mutex)(&chg->hwlock);
+	WRITE_ONCE(chg->stopping, false);
+
+	chg->jeita_ext_temp = of_property_read_bool(pdev->dev.of_node,
+			"qcom,jeita-extended-temp-range");
+
+	chg->charging_disabled = of_property_read_bool(pdev->dev.of_node,
+			"qcom,charging-disabled");
+	if (chg->charging_disabled)
+		dev_info(&pdev->dev,
+			 "charging disabled by device tree; keeping the charge path off\n");
+
+	/*
+	 * The BTC temperature-range select (and the comparator enable,
+	 * formerly set unconditionally from smbb_charger_setup[]) is left
+	 * exactly as the boot chain configured it, matching the vendor
+	 * driver on this board.  See the BPD/VREF entries in the setup
+	 * table for why arming comparators here is unsafe.
+	 */
+
+	/*
+	 * Clear the sticky gates before the setup table enables charging:
+	 * whatever the boot chain (or a previous kernel) left behind must not
+	 * outlive our probe.
+	 */
+	smbb_clear_gates(chg, false);
+
+	for (i = 0; i < ARRAY_SIZE(smbb_charger_setup); ++i) {
+		const struct reg_off_mask_default *r = &smbb_charger_setup[i];
+
+		if (r->rev_mask & BIT(chg->revision))
+			continue;
+
+		/* the battery supply is registered: the user may have stopped it */
+		if (chg->user_inhibit && r->offset == SMBB_CHG_CTRL &&
+		    (r->value & CTRL_EN))
+			continue;
+
+		if (r->force) {
+			rc = regmap_write(chg->regmap, chg->addr + r->offset,
+					  r->value);
+			if (rc) {
+				dev_err(&pdev->dev,
+					"unable to initializing charging, bailing\n");
+				return rc;
+			}
+			continue;
+		}
+
+		rc = regmap_update_bits(chg->regmap, chg->addr + r->offset,
+				r->mask, r->value);
+		if (rc) {
+			dev_err(&pdev->dev,
+				"unable to initializing charging, bailing\n");
+			return rc;
+		}
+	}
+
+	/*
+	 * The table ends by enabling the charge path. A board that must never
+	 * charge gets it switched off again before anything else can run.
+	 */
+	if (chg->charging_disabled)
+		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				   CTRL_EN, 0);
 
 	for (i = 0; i < ARRAY_SIZE(smbb_charger_irqs); ++i) {
 		int irq;
@@ -1824,56 +2722,6 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	if (IS_ERR(chg->otg_reg))
 		return PTR_ERR(chg->otg_reg);
 
-	chg->jeita_ext_temp = of_property_read_bool(pdev->dev.of_node,
-			"qcom,jeita-extended-temp-range");
-
-	chg->charging_disabled = of_property_read_bool(pdev->dev.of_node,
-			"qcom,charging-disabled");
-	if (chg->charging_disabled)
-		dev_info(&pdev->dev,
-			 "charging disabled by device tree; keeping the charge path off\n");
-
-	/*
-	 * The BTC temperature-range select (and the comparator enable,
-	 * formerly set unconditionally from smbb_charger_setup[]) is left
-	 * exactly as the boot chain configured it, matching the vendor
-	 * driver on this board.  See the BPD/VREF entries in the setup
-	 * table for why arming comparators here is unsafe.
-	 */
-
-	/*
-	 * Clear the sticky gates before the setup table enables charging:
-	 * whatever the boot chain (or a previous kernel) left behind must not
-	 * outlive our probe.
-	 */
-	smbb_clear_gates(chg);
-
-	for (i = 0; i < ARRAY_SIZE(smbb_charger_setup); ++i) {
-		const struct reg_off_mask_default *r = &smbb_charger_setup[i];
-
-		if (r->rev_mask & BIT(chg->revision))
-			continue;
-
-		if (r->force) {
-			rc = regmap_write(chg->regmap, chg->addr + r->offset,
-					  r->value);
-			if (rc) {
-				dev_err(&pdev->dev,
-					"unable to initializing charging, bailing\n");
-				return rc;
-			}
-			continue;
-		}
-
-		rc = regmap_update_bits(chg->regmap, chg->addr + r->offset,
-				r->mask, r->value);
-		if (rc) {
-			dev_err(&pdev->dev,
-				"unable to initializing charging, bailing\n");
-			return rc;
-		}
-	}
-
 	platform_set_drvdata(pdev, chg);
 
 	smbb_debugfs_init(chg);
@@ -1889,8 +2737,17 @@ static void smbb_charger_remove(struct platform_device *pdev)
 
 	chg = platform_get_drvdata(pdev);
 
+	/* An interrupt that kicks the supervisor from here on finds it stopped. */
+	scoped_guard(mutex, &chg->hwlock)
+		WRITE_ONCE(chg->stopping, true);
 	cancel_delayed_work_sync(&chg->engage_work);
 	debugfs_remove_recursive(chg->debugfs);
+
+	guard(mutex)(&chg->hwlock);
+
+	/* A reverse-boost pause may have been cut off with its force set. */
+	regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+			   CTRL_ON_BAT_FORCE, 0);
 
 	/*
 	 * Leave the charge path armed when it is the system's supply.
@@ -1903,12 +2760,43 @@ static void smbb_charger_remove(struct platform_device *pdev)
 	 * the original behaviour is kept - stopping a charge cycle on unbind is
 	 * correct, and the pack carries the system regardless.
 	 */
-	if (smbb_battery_present(chg))
+	if (!chg->no_battery && !chg->absent)
 		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
 				   CTRL_EN, 0);
 	else
 		dev_info(chg->dev,
 			 "no battery: leaving the charge path armed on remove, it powers the system\n");
+}
+
+/*
+ * Reboot or power-off: nothing of ours may keep the next stage from
+ * charging, and nothing of ours may lift a stop either. Lift the force. Enable
+ * the charge path where charging is permitted - a re-arm or a reverse-boost
+ * pause may have been cut off with it down - and leave it as the supervisor
+ * left it where a stop is in force. A board declared battery-less keeps its
+ * supply.
+ */
+static void smbb_charger_shutdown(struct platform_device *pdev)
+{
+	struct smbb_charger *chg = platform_get_drvdata(pdev);
+	unsigned int mask = CTRL_ON_BAT_FORCE, val = 0;
+
+	if (!chg)
+		return;
+
+	scoped_guard(mutex, &chg->hwlock)
+		WRITE_ONCE(chg->stopping, true);
+	cancel_delayed_work_sync(&chg->engage_work);
+
+	guard(mutex)(&chg->hwlock);
+
+	if (chg->charging_disabled) {
+		mask |= CTRL_EN;
+	} else if (chg->no_battery || smbb_charge_permitted(chg)) {
+		mask |= CTRL_EN;
+		val = CTRL_EN;
+	}
+	regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL, mask, val);
 }
 
 static const struct of_device_id smbb_charger_id_table[] = {
@@ -1921,6 +2809,7 @@ MODULE_DEVICE_TABLE(of, smbb_charger_id_table);
 static struct platform_driver smbb_charger_driver = {
 	.probe	  = smbb_charger_probe,
 	.remove_new	 = smbb_charger_remove,
+	.shutdown = smbb_charger_shutdown,
 	.driver	 = {
 		.name   = "qcom-smbb",
 		.of_match_table = smbb_charger_id_table,
