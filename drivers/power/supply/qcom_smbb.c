@@ -175,6 +175,12 @@ struct smbb_charger {
 	bool charging_disabled;
 	unsigned long status;
 	struct mutex statlock;
+	/*
+	 * Serialises everything that writes the charge path: the supervisor
+	 * against probe, whose SEC_ACCESS unlocks only cover the very next
+	 * write to the peripheral.
+	 */
+	struct mutex hwlock;
 
 	/*
 	 * Engagement supervisor.  The hardware needs software to keep the
@@ -703,6 +709,8 @@ static void smbb_engage_work(struct work_struct *work)
 	bool input, charging, bat_ready, done;
 	unsigned int delay = SMBB_ENGAGE_POLL_MS;
 	const char *mode;
+
+	guard(mutex)(&chg->hwlock);
 
 	smbb_hw_state(chg, &input, &charging, &bat_ready, &done);
 
@@ -1610,6 +1618,7 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->dev = &pdev->dev;
 	mutex_init(&chg->statlock);
+	mutex_init(&chg->hwlock);
 
 	/*
 	 * Optional: a battery-voltage channel lets the supervisor recognise a
@@ -1784,45 +1793,12 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		smbb_set_iusb(chg, chg->iusb_floor_idx);
 	}
 
-
-	for (i = 0; i < ARRAY_SIZE(smbb_charger_irqs); ++i) {
-		int irq;
-
-		irq = platform_get_irq_byname(pdev, smbb_charger_irqs[i].name);
-		if (irq < 0)
-			return irq;
-
-		smbb_charger_irqs[i].handler(irq, chg);
-
-		rc = devm_request_threaded_irq(&pdev->dev, irq, NULL,
-				smbb_charger_irqs[i].handler, IRQF_ONESHOT,
-				smbb_charger_irqs[i].name, chg);
-		if (rc) {
-			dev_err(&pdev->dev, "failed to request irq '%s'\n",
-				smbb_charger_irqs[i].name);
-			return rc;
-		}
-	}
-
 	/*
-	 * otg regulator is used to control VBUS voltage direction
-	 * when USB switches between host and gadget mode
+	 * Everything below writes the charge path, and the interrupt handlers
+	 * registered further down start the supervisor: keep it out until the
+	 * path is fully set up.
 	 */
-	chg->otg_rdesc.id = -1;
-	chg->otg_rdesc.name = "otg-vbus";
-	chg->otg_rdesc.ops = &smbb_chg_otg_ops;
-	chg->otg_rdesc.owner = THIS_MODULE;
-	chg->otg_rdesc.type = REGULATOR_VOLTAGE;
-	chg->otg_rdesc.supply_name = "usb-otg-in";
-	chg->otg_rdesc.of_match = "otg-vbus";
-
-	config.dev = &pdev->dev;
-	config.driver_data = chg;
-
-	chg->otg_reg = devm_regulator_register(&pdev->dev, &chg->otg_rdesc,
-					       &config);
-	if (IS_ERR(chg->otg_reg))
-		return PTR_ERR(chg->otg_reg);
+	guard(mutex)(&chg->hwlock);
 
 	chg->jeita_ext_temp = of_property_read_bool(pdev->dev.of_node,
 			"qcom,jeita-extended-temp-range");
@@ -1873,6 +1849,53 @@ static int smbb_charger_probe(struct platform_device *pdev)
 			return rc;
 		}
 	}
+
+	/*
+	 * The table ends by enabling the charge path. A board that must never
+	 * charge gets it switched off again before anything else can run.
+	 */
+	if (chg->charging_disabled)
+		regmap_update_bits(chg->regmap, chg->addr + SMBB_CHG_CTRL,
+				   CTRL_EN, 0);
+
+	for (i = 0; i < ARRAY_SIZE(smbb_charger_irqs); ++i) {
+		int irq;
+
+		irq = platform_get_irq_byname(pdev, smbb_charger_irqs[i].name);
+		if (irq < 0)
+			return irq;
+
+		smbb_charger_irqs[i].handler(irq, chg);
+
+		rc = devm_request_threaded_irq(&pdev->dev, irq, NULL,
+				smbb_charger_irqs[i].handler, IRQF_ONESHOT,
+				smbb_charger_irqs[i].name, chg);
+		if (rc) {
+			dev_err(&pdev->dev, "failed to request irq '%s'\n",
+				smbb_charger_irqs[i].name);
+			return rc;
+		}
+	}
+
+	/*
+	 * otg regulator is used to control VBUS voltage direction
+	 * when USB switches between host and gadget mode
+	 */
+	chg->otg_rdesc.id = -1;
+	chg->otg_rdesc.name = "otg-vbus";
+	chg->otg_rdesc.ops = &smbb_chg_otg_ops;
+	chg->otg_rdesc.owner = THIS_MODULE;
+	chg->otg_rdesc.type = REGULATOR_VOLTAGE;
+	chg->otg_rdesc.supply_name = "usb-otg-in";
+	chg->otg_rdesc.of_match = "otg-vbus";
+
+	config.dev = &pdev->dev;
+	config.driver_data = chg;
+
+	chg->otg_reg = devm_regulator_register(&pdev->dev, &chg->otg_rdesc,
+					       &config);
+	if (IS_ERR(chg->otg_reg))
+		return PTR_ERR(chg->otg_reg);
 
 	platform_set_drvdata(pdev, chg);
 
