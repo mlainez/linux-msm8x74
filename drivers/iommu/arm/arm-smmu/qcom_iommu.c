@@ -204,8 +204,6 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 	return readq_relaxed(ctx->base + reg);
 }
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
-
 /*
  * Vendor BFB/prefetch block: implementation-defined SMMU global registers
  * (base + 0x2008..0x2540) that downstream programs on every 8974 SMMU --
@@ -1199,21 +1197,6 @@ static struct platform_driver qcom_iommu_ctx_driver = {
 	.probe	= qcom_iommu_ctx_probe,
 	.remove = qcom_iommu_ctx_remove,
 };
-
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
-{
-	struct device_node *child;
-
-	for_each_child_of_node(qcom_iommu->dev->of_node, child) {
-		if (of_device_is_compatible(child, "qcom,msm-iommu-v1-sec") ||
-		    of_device_is_compatible(child, "qcom,msm-iommu-v2-sec")) {
-			of_node_put(child);
-			return true;
-		}
-	}
-
-	return false;
-}
 
 /*
  * DEBUG (mdp-iommu bring-up): dump the live context-bank state some time
