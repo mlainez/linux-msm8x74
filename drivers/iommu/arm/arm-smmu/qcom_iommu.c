@@ -443,6 +443,16 @@ static void qcom_iommu_glb_program_ctx(struct qcom_iommu_dev *qcom_iommu,
 		       base + QSMMU_GLB_S2CR(idx));
 }
 
+/*
+ * DEBUG: context-bank flavour of the MSM8974 TrustZone-managed instance.
+ * The vendor kernel runs it with SCTLR 0x1043 (no stall, no abort on fault:
+ * sec_sctlr_clear=0xa8) and ACTLR 0x70000000.
+ */
+static unsigned int sec_sctlr_clear;
+module_param(sec_sctlr_clear, uint, 0444);
+static unsigned int sec_actlr;
+module_param(sec_actlr, uint, 0444);
+
 static int qcom_iommu_init_domain(struct iommu_domain *domain,
 				  struct qcom_iommu_dev *qcom_iommu,
 				  struct device *dev)
@@ -656,6 +666,12 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 
 		if (IS_ENABLED(CONFIG_CPU_BIG_ENDIAN))
 			reg |= ARM_SMMU_SCTLR_E;
+
+		if (use_v7s) {
+			reg &= ~sec_sctlr_clear;
+			if (sec_actlr)
+				iommu_writel(ctx, ARM_SMMU_CB_ACTLR, sec_actlr);
+		}
 
 		iommu_writel(ctx, ARM_SMMU_CB_SCTLR, reg);
 
