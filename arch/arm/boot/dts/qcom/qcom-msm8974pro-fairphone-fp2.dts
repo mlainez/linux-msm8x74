@@ -483,8 +483,9 @@
 	 * path that stalled: the hardware reports neither a running cycle nor
 	 * end-of-charge while a full pack sits above the recharge threshold.
 	 */
-	io-channels = <&pm8941_vadc VADC_VBAT_SNS>;
-	io-channel-names = "vbat";
+	io-channels = <&pm8941_vadc VADC_VBAT_SNS>,
+		      <&pm8941_vadc VADC_LR_MUX1_BAT_THERM>;
+	io-channel-names = "vbat", "batt-therm";
 
 	status = "okay";
 };
