@@ -108,6 +108,25 @@ properties:
     type: boolean
     description: Disable DC charger
 
+  qcom,no-battery:
+    type: boolean
+    description: |
+      The board has no battery and is powered from the charger input or at
+      the battery terminals. The charge path is kept enabled as the system
+      supply and the battery presence, temperature and voltage are ignored.
+
+  io-channels:
+    minItems: 1
+    items:
+      - description: battery voltage
+      - description: battery thermistor temperature
+
+  io-channel-names:
+    minItems: 1
+    items:
+      - const: vbat
+      - const: batt-therm
+
   qcom,jeita-extended-temp-range:
     type: boolean
     description: |
