@@ -145,6 +145,39 @@
 #define STATUS_CHG_FAST		BIT(7) /* Fast charging */
 #define STATUS_CHG_GONE		BIT(8) /* No charger is connected */
 
+/*
+ * Battery temperature, in millidegrees Celsius.
+ *
+ * The PMIC comparators only stop a cycle at the two ends of their window. In
+ * between, the vendor kernel charges a cool (below 10 C) or warm (from 45 C)
+ * battery at 350 mA to 4.10 V; charging at the full rate there plates lithium
+ * when cold and ages the cell when warm. The stops at 0 C and 55 C are a
+ * second layer under the comparators, whose thresholds are whatever the boot
+ * chain left. A reading at either end of the conversion table is a thermistor
+ * that is open or shorted, and a battery whose temperature is unknown is not
+ * charged.
+ */
+#define SMBB_TEMP_COLD_MC	0
+#define SMBB_TEMP_COOL_MC	10000
+#define SMBB_TEMP_WARM_MC	45000
+#define SMBB_TEMP_HOT_MC	55000
+#define SMBB_TEMP_HYST_MC	2000
+#define SMBB_TEMP_MIN_MC	(-30000)
+#define SMBB_TEMP_MAX_MC	90000
+#define SMBB_DERATED_IMAX_UA	350000
+#define SMBB_DERATED_VMAX_UV	4100000
+#define SMBB_DERATED_VDET_UV	4000000
+
+enum smbb_zone {
+	SMBB_ZONE_NORMAL,
+	SMBB_ZONE_COOL,
+	SMBB_ZONE_WARM,
+	/* no charging from here on */
+	SMBB_ZONE_COLD,
+	SMBB_ZONE_HOT,
+	SMBB_ZONE_UNKNOWN,
+};
+
 enum smbb_attr {
 	ATTR_BAT_ISAFE,
 	ATTR_BAT_IMAX,
@@ -211,6 +244,7 @@ struct smbb_charger {
 	unsigned int collapse_count;
 	bool collapse_pending;
 	unsigned int rearm_delay_ms;	/* backoff between re-arm attempts */
+	unsigned long rearm_not_before;	/* jiffies: no CTRL_EN toggle earlier */
 
 	/*
 	 * Battery voltage, when the board provides it.  Without it the
@@ -219,6 +253,10 @@ struct smbb_charger {
 	 * a running cycle nor end-of-charge in that state.
 	 */
 	struct iio_channel *vbat_chan;
+	/* Battery thermistor: see enum smbb_zone. */
+	struct iio_channel *temp_chan;
+	enum smbb_zone zone;
+	int temp_mc;
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
@@ -228,6 +266,8 @@ struct smbb_charger {
 	 * may ask for.
 	 */
 	unsigned int dt_attr[_ATTR_CNT];
+	/* What userspace asked for, within dt_attr[]; restored after derating. */
+	unsigned int want_attr[_ATTR_CNT];
 
 	struct power_supply *usb_psy;
 	struct power_supply *dc_psy;
@@ -708,6 +748,95 @@ static bool smbb_battery_full(struct smbb_charger *chg)
 	return uv >= chg->attr[ATTR_CHG_VDET];
 }
 
+static const char * const smbb_zone_names[] = {
+	[SMBB_ZONE_NORMAL] = "in range",
+	[SMBB_ZONE_COOL] = "cool",
+	[SMBB_ZONE_WARM] = "warm",
+	[SMBB_ZONE_COLD] = "too cold",
+	[SMBB_ZONE_HOT] = "too hot",
+	[SMBB_ZONE_UNKNOWN] = "of unknown temperature",
+};
+
+static enum smbb_zone smbb_read_zone(struct smbb_charger *chg)
+{
+	int cold = SMBB_TEMP_COLD_MC, cool = SMBB_TEMP_COOL_MC;
+	int warm = SMBB_TEMP_WARM_MC, hot = SMBB_TEMP_HOT_MC;
+	int t, rc;
+
+	if (!chg->temp_chan)
+		return SMBB_ZONE_NORMAL;
+
+	rc = iio_read_channel_processed(chg->temp_chan, &t);
+	if (rc < 0 || t <= SMBB_TEMP_MIN_MC || t >= SMBB_TEMP_MAX_MC)
+		return SMBB_ZONE_UNKNOWN;
+	chg->temp_mc = t;
+
+	/* Leaving a zone takes SMBB_TEMP_HYST_MC more than entering it. */
+	if (chg->zone == SMBB_ZONE_COLD)
+		cold += SMBB_TEMP_HYST_MC;
+	if (chg->zone == SMBB_ZONE_COLD || chg->zone == SMBB_ZONE_COOL)
+		cool += SMBB_TEMP_HYST_MC;
+	if (chg->zone == SMBB_ZONE_HOT)
+		hot -= SMBB_TEMP_HYST_MC;
+	if (chg->zone == SMBB_ZONE_HOT || chg->zone == SMBB_ZONE_WARM)
+		warm -= SMBB_TEMP_HYST_MC;
+
+	if (t < cold)
+		return SMBB_ZONE_COLD;
+	if (t < cool)
+		return SMBB_ZONE_COOL;
+	if (t >= hot)
+		return SMBB_ZONE_HOT;
+	if (t >= warm)
+		return SMBB_ZONE_WARM;
+	return SMBB_ZONE_NORMAL;
+}
+
+/*
+ * Program the charge rate, float voltage and recharge threshold that go with
+ * the battery temperature. The recharge threshold has to follow the float
+ * voltage down: left at its configured value it sits above a derated float
+ * voltage, and the hardware would restart a cycle the moment one ended.
+ */
+static void smbb_apply_limits(struct smbb_charger *chg)
+{
+	bool derate = chg->zone != SMBB_ZONE_NORMAL;
+	unsigned int imax = chg->want_attr[ATTR_BAT_IMAX];
+	unsigned int vmax = chg->want_attr[ATTR_BAT_VMAX];
+	unsigned int vdet = chg->dt_attr[ATTR_CHG_VDET];
+
+	if (derate) {
+		imax = min(imax, SMBB_DERATED_IMAX_UA);
+		vmax = min(vmax, SMBB_DERATED_VMAX_UV);
+		vdet = min(vdet, SMBB_DERATED_VDET_UV);
+	}
+
+	if (imax != chg->attr[ATTR_BAT_IMAX])
+		smbb_charger_attr_write(chg, ATTR_BAT_IMAX, imax);
+	if (vmax != chg->attr[ATTR_BAT_VMAX])
+		smbb_charger_attr_write(chg, ATTR_BAT_VMAX, vmax);
+	if (vdet != chg->attr[ATTR_CHG_VDET])
+		smbb_charger_attr_write(chg, ATTR_CHG_VDET, vdet);
+}
+
+static void smbb_set_zone(struct smbb_charger *chg, enum smbb_zone zone)
+{
+	if (zone == chg->zone)
+		return;
+
+	if (zone == SMBB_ZONE_UNKNOWN)
+		dev_err(chg->dev,
+			"battery temperature unreadable: not charging\n");
+	else
+		dev_info(chg->dev, "battery %s at %d mC: %s\n",
+			 smbb_zone_names[zone], chg->temp_mc,
+			 zone >= SMBB_ZONE_COLD ? "not charging" :
+			 zone == SMBB_ZONE_NORMAL ? "charging at the full rate" :
+			 "charging at the reduced rate");
+	chg->zone = zone;
+	smbb_apply_limits(chg);
+}
+
 static void smbb_engage_work(struct work_struct *work)
 {
 	struct smbb_charger *chg = container_of(work, struct smbb_charger,
@@ -766,6 +895,7 @@ static void smbb_engage_work(struct work_struct *work)
 		chg->iusb_learn_idx = chg->iusb_max_idx;
 		chg->collapse_pending = false;
 		chg->rearm_delay_ms = SMBB_ENGAGE_POLL_MS;
+		chg->rearm_not_before = jiffies;
 		chg->rearm_stage = 0;
 		/*
 		 * ... but only when there is a battery to fall back on.  With no
@@ -783,12 +913,24 @@ static void smbb_engage_work(struct work_struct *work)
 		return;	/* an insertion IRQ reschedules us */
 	}
 
+	/*
+	 * Battery temperature, before anything below can arm the path. Only
+	 * for a fitted battery: without one the input powers the system and
+	 * the thermistor line is open.
+	 */
+	if (smbb_battery_present(chg)) {
+		smbb_set_zone(chg, smbb_read_zone(chg));
+		if (chg->zone >= SMBB_ZONE_COLD)
+			bat_ready = false;
+	}
+
 	if (charging != chg->was_charging) {
 		dev_info(chg->dev, "charge cycle %s\n",
 			 charging ? "running" : "stopped");
 		chg->was_charging = charging;
 		/* a state change is a fresh opportunity: retry promptly again */
 		chg->rearm_delay_ms = SMBB_ENGAGE_POLL_MS;
+		chg->rearm_not_before = jiffies;
 	}
 
 	/*
@@ -865,7 +1007,12 @@ static void smbb_engage_work(struct work_struct *work)
 		 */
 		chg->rearm_delay_ms = min(chg->rearm_delay_ms * 3,
 					  SMBB_REARM_MAX_MS);
-		delay = chg->rearm_delay_ms;
+		/*
+		 * Only the toggle backs off. The pass itself keeps its period:
+		 * it is also what watches the battery temperature.
+		 */
+		chg->rearm_not_before = jiffies +
+					msecs_to_jiffies(chg->rearm_delay_ms);
 		break;
 	default:
 		/*
@@ -950,6 +1097,8 @@ static void smbb_engage_work(struct work_struct *work)
 					   CTRL_EN, CTRL_EN);
 			break;
 		}
+		if (time_before(jiffies, chg->rearm_not_before))
+			break;
 		/*
 		 * Input present, battery present and in range, yet no cycle:
 		 * drop CTRL_EN so the next pass raises it, clearing any
@@ -1017,6 +1166,7 @@ static irqreturn_t smbb_bat_temp_handler(int irq, void *_data)
 	mutex_unlock(&chg->statlock);
 
 	power_supply_changed(chg->bat_psy);
+	smbb_engage_kick(chg);
 	return IRQ_HANDLED;
 }
 
@@ -1026,6 +1176,7 @@ static irqreturn_t smbb_bat_present_handler(int irq, void *_data)
 
 	smbb_set_line_flag(chg, irq, STATUS_BAT_PRESENT);
 	power_supply_changed(chg->bat_psy);
+	smbb_engage_kick(chg);
 
 	return IRQ_HANDLED;
 }
@@ -1249,12 +1400,31 @@ static int smbb_battery_get_property(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
-		if (status & STATUS_BAT_OK)
-			val->intval = POWER_SUPPLY_HEALTH_GOOD;
-		else if (status & STATUS_BAT_HOT)
+		if (chg->zone == SMBB_ZONE_UNKNOWN)
+			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
+		else if (chg->zone == SMBB_ZONE_HOT)
 			val->intval = POWER_SUPPLY_HEALTH_OVERHEAT;
-		else
+		else if (chg->zone == SMBB_ZONE_COLD)
 			val->intval = POWER_SUPPLY_HEALTH_COLD;
+		else if (!(status & STATUS_BAT_OK))
+			val->intval = status & STATUS_BAT_HOT ?
+				      POWER_SUPPLY_HEALTH_OVERHEAT :
+				      POWER_SUPPLY_HEALTH_COLD;
+		else if (chg->zone == SMBB_ZONE_WARM)
+			val->intval = POWER_SUPPLY_HEALTH_WARM;
+		else if (chg->zone == SMBB_ZONE_COOL)
+			val->intval = POWER_SUPPLY_HEALTH_COOL;
+		else
+			val->intval = POWER_SUPPLY_HEALTH_GOOD;
+		break;
+	case POWER_SUPPLY_PROP_TEMP:
+		if (!chg->temp_chan)
+			return -ENODATA;
+		rc = iio_read_channel_processed(chg->temp_chan, &val->intval);
+		if (rc < 0)
+			return rc;
+		val->intval /= 100;	/* tenths of a degree */
+		rc = 0;
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_TYPE:
 		if (status & STATUS_CHG_FAST)
@@ -1302,16 +1472,20 @@ static int smbb_battery_set_property(struct power_supply *psy,
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
 		if (val->intval > chg->dt_attr[ATTR_BAT_IMAX])
 			return -EINVAL;
-		scoped_guard(mutex, &chg->hwlock)
-			rc = smbb_charger_attr_write(chg, ATTR_BAT_IMAX,
-						     val->intval);
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->want_attr[ATTR_BAT_IMAX] = val->intval;
+			smbb_apply_limits(chg);
+		}
+		rc = 0;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
 		if (val->intval > chg->dt_attr[ATTR_BAT_VMAX])
 			return -EINVAL;
-		scoped_guard(mutex, &chg->hwlock)
-			rc = smbb_charger_attr_write(chg, ATTR_BAT_VMAX,
-						     val->intval);
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->want_attr[ATTR_BAT_VMAX] = val->intval;
+			smbb_apply_limits(chg);
+		}
+		rc = 0;
 		break;
 	default:
 		rc = -EINVAL;
@@ -1348,6 +1522,7 @@ static enum power_supply_property smbb_battery_properties[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_MAX,
 	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
+	POWER_SUPPLY_PROP_TEMP,
 };
 
 static const struct reg_off_mask_default {
@@ -1532,6 +1707,11 @@ static int smbb_state_show(struct seq_file *s, void *data)
 	} else {
 		seq_puts(s, "battery       no voltage channel\n");
 	}
+	if (chg->temp_chan)
+		seq_printf(s, "temperature   %d mC, battery %s\n", chg->temp_mc,
+			   smbb_zone_names[chg->zone]);
+	else
+		seq_puts(s, "temperature   no thermistor channel\n");
 	seq_printf(s, "input limit   %u uA (floor %u, ceiling %u, learned %u, collapses %u)\n",
 		   smbb_imax_fn(chg->iusb_idx),
 		   smbb_imax_fn(chg->iusb_floor_idx),
@@ -1673,6 +1853,20 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	}
 
 	/*
+	 * Optional as well: the battery thermistor, for the temperature window
+	 * described at enum smbb_zone. A board that does not wire it up keeps
+	 * relying on the PMIC comparators alone.
+	 */
+	chg->temp_chan = devm_iio_channel_get(&pdev->dev, "batt-therm");
+	if (IS_ERR(chg->temp_chan)) {
+		if (PTR_ERR(chg->temp_chan) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "no batt-therm channel: %pe\n",
+			chg->temp_chan);
+		chg->temp_chan = NULL;
+	}
+
+	/*
 	 * The supervisor requeues itself and is kicked from the interrupt
 	 * handlers: it must not outlive chg on a failed probe or an unbind.
 	 * Registered before the interrupts, so it is cancelled after they are
@@ -1718,6 +1912,7 @@ static int smbb_charger_probe(struct platform_device *pdev)
 		}
 	}
 	memcpy(chg->dt_attr, chg->attr, sizeof(chg->dt_attr));
+	memcpy(chg->want_attr, chg->attr, sizeof(chg->want_attr));
 
 	/*
 	 * The safety ceilings lock once the boot chain has declared itself
