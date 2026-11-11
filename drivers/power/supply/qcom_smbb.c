@@ -222,6 +222,12 @@ struct smbb_charger {
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
+	/*
+	 * What the device tree allows. attr[] follows what is programmed,
+	 * which the driver lowers by itself; these are the most that userspace
+	 * may ask for.
+	 */
+	unsigned int dt_attr[_ATTR_CNT];
 
 	struct power_supply *usb_psy;
 	struct power_supply *dc_psy;
@@ -1112,7 +1118,7 @@ static int smbb_usbin_get_property(struct power_supply *psy,
 		val->intval = chg->attr[ATTR_USBIN_IMAX];
 		break;
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT_MAX:
-		val->intval = 2500000;
+		val->intval = chg->dt_attr[ATTR_USBIN_IMAX];
 		break;
 	default:
 		rc = -EINVAL;
@@ -1130,10 +1136,27 @@ static int smbb_usbin_set_property(struct power_supply *psy,
 	int rc;
 
 	switch (psp) {
-	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
-		rc = smbb_charger_attr_write(chg, ATTR_USBIN_IMAX,
-				val->intval);
+	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT: {
+		unsigned int idx;
+
+		if (val->intval < SMBB_IUSB_FLOOR_UA ||
+		    val->intval > chg->dt_attr[ATTR_USBIN_IMAX])
+			return -EINVAL;
+		/*
+		 * A ceiling for the adaptive limit, not a value to program:
+		 * the limit still has to be reached one settled step at a time.
+		 */
+		idx = smbb_hw_lookup(val->intval, smbb_imax_fn);
+		scoped_guard(mutex, &chg->hwlock) {
+			chg->iusb_max_idx = idx;
+			chg->iusb_learn_idx = min(chg->iusb_learn_idx, idx);
+			if (chg->iusb_idx > idx)
+				smbb_set_iusb(chg, idx);
+			chg->attr[ATTR_USBIN_IMAX] = smbb_imax_fn(idx);
+		}
+		rc = 0;
 		break;
+	}
 	default:
 		rc = -EINVAL;
 		break;
@@ -1179,6 +1202,8 @@ static int smbb_dcin_set_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CHARGE_CONTROL_LIMIT:
+		if (val->intval > chg->dt_attr[ATTR_DCIN_IMAX])
+			return -EINVAL;
 		rc = smbb_charger_attr_write(chg, ATTR_DCIN_IMAX,
 				val->intval);
 		break;
@@ -1275,10 +1300,18 @@ static int smbb_battery_set_property(struct power_supply *psy,
 
 	switch (psp) {
 	case POWER_SUPPLY_PROP_CURRENT_MAX:
-		rc = smbb_charger_attr_write(chg, ATTR_BAT_IMAX, val->intval);
+		if (val->intval > chg->dt_attr[ATTR_BAT_IMAX])
+			return -EINVAL;
+		scoped_guard(mutex, &chg->hwlock)
+			rc = smbb_charger_attr_write(chg, ATTR_BAT_IMAX,
+						     val->intval);
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MAX:
-		rc = smbb_charger_attr_write(chg, ATTR_BAT_VMAX, val->intval);
+		if (val->intval > chg->dt_attr[ATTR_BAT_VMAX])
+			return -EINVAL;
+		scoped_guard(mutex, &chg->hwlock)
+			rc = smbb_charger_attr_write(chg, ATTR_BAT_VMAX,
+						     val->intval);
 		break;
 	default:
 		rc = -EINVAL;
@@ -1431,6 +1464,8 @@ static const struct {
 	{ "chg_ctrl",     SMBB_CHG_CTRL },
 	{ "chg_failed",   SMBB_CHG_FAILED },
 	{ "vmax",         SMBB_CHG_VMAX },
+	{ "vsafe",        SMBB_CHG_VSAFE },
+	{ "isafe",        SMBB_CHG_ISAFE },
 	{ "vbat_det",     SMBB_CHG_VBAT_DET },
 	{ "ibat_max",     SMBB_CHG_IMAX },
 	{ "vin_min",      SMBB_CHG_VIN_MIN },
@@ -1682,6 +1717,25 @@ static int smbb_charger_probe(struct platform_device *pdev)
 			return rc;
 		}
 	}
+	memcpy(chg->dt_attr, chg->attr, sizeof(chg->dt_attr));
+
+	/*
+	 * The safety ceilings lock once the boot chain has declared itself
+	 * done, so the values in force may not be the ones asked for above.
+	 * They bound everything else: read them back and say so.
+	 */
+	smbb_charger_attr_read(chg, ATTR_BAT_VSAFE);
+	smbb_charger_attr_read(chg, ATTR_BAT_ISAFE);
+	dev_info(&pdev->dev,
+		 "charging to %u uV at %u uA, hardware ceilings %u uV and %u uA\n",
+		 chg->attr[ATTR_BAT_VMAX], chg->attr[ATTR_BAT_IMAX],
+		 chg->attr[ATTR_BAT_VSAFE], chg->attr[ATTR_BAT_ISAFE]);
+	if (chg->attr[ATTR_BAT_VSAFE] > chg->dt_attr[ATTR_BAT_VSAFE] ||
+	    chg->attr[ATTR_BAT_ISAFE] > chg->dt_attr[ATTR_BAT_ISAFE])
+		dev_warn(&pdev->dev,
+			 "hardware ceilings are above the configured %u uV and %u uA\n",
+			 chg->dt_attr[ATTR_BAT_VSAFE],
+			 chg->dt_attr[ATTR_BAT_ISAFE]);
 
 	bat_cfg.drv_data = chg;
 	bat_cfg.of_node = pdev->dev.of_node;
