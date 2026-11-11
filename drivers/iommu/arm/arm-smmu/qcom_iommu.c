@@ -197,8 +197,6 @@ iommu_readq(struct qcom_iommu_ctx *ctx, unsigned reg)
 	return readq_relaxed(ctx->base + reg);
 }
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu);
-
 /*
  * Vendor BFB/prefetch block: implementation-defined SMMU global registers
  * (base + 0x2008..0x2540) that downstream programs on every 8974 SMMU --
@@ -1159,21 +1157,6 @@ static struct platform_driver qcom_iommu_ctx_driver = {
 	.remove = qcom_iommu_ctx_remove,
 };
 
-static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
-{
-	struct device_node *child;
-
-	for_each_child_of_node(qcom_iommu->dev->of_node, child) {
-		if (of_device_is_compatible(child, "qcom,msm-iommu-v1-sec") ||
-		    of_device_is_compatible(child, "qcom,msm-iommu-v2-sec")) {
-			of_node_put(child);
-			return true;
-		}
-	}
-
-	return false;
-}
-
 /*
  * DEBUG (mdp-iommu bring-up): dump the live context-bank state some time
  * after attach so we can see whether the bank is actually in the
@@ -1280,9 +1263,8 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		/*
 		 * A non-secure IOMMU (e.g. the MSM8974 GPU/Venus SMMUs) has no
 		 * TrustZone-owned stream mapping: HLOS programs it directly and
-		 * no restore_sec_cfg()/secure page-table pool is needed. All
-		 * secure-only paths below are gated by
-		 * qcom_iommu_has_secure_context(), so sec_id stays unused here.
+		 * no restore_sec_cfg()/secure page-table pool is needed, so
+		 * sec_id stays unused here.
 		 */
 		qcom_iommu->sec_id = -1;
 		qcom_iommu->nonsecure = true;
@@ -1291,7 +1273,14 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	qcom_iommu->is_msm8974 = of_device_is_compatible(dev->of_node,
 							 "qcom,msm8974-iommu");
 
-	if (qcom_iommu_has_secure_context(qcom_iommu)) {
+	/*
+	 * TrustZone needs its page-table pool before it is asked to configure
+	 * an instance, whether or not that instance declares a secure context
+	 * bank. Without the pool restore_sec_cfg() still reports success, but
+	 * installs no stream mapping: the instance stays in bypass and its
+	 * masters fetch physical memory at the IOVAs they are given.
+	 */
+	if (!qcom_iommu->nonsecure) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
 		if (ret) {
 			dev_err(dev, "cannot init secure pg table(%d)\n", ret);
