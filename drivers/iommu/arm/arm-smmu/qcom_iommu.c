@@ -141,6 +141,8 @@ struct qcom_iommu_dev {
 	bool			 is_msm8974;
 	struct delayed_work	 dbg_work;   /* DEBUG: CB state dump */
 	bool			 bfb_written;
+	/* The instance is held resumed for good since its first attach. */
+	bool			 pinned;
 	u8			 max_asid;
 	struct qcom_iommu_ctx	*ctxs[];   /* indexed by asid */
 };
@@ -469,6 +471,21 @@ static int qcom_iommu_init_domain(struct iommu_domain *domain,
 	bool use_v7s = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
 	int i, ret = 0;
 	u32 reg;
+
+	/*
+	 * A TrustZone-managed instance behind a power domain (MSM8974 MDP on
+	 * MDSS_GDSC) is powered up and configured here, at its first attach,
+	 * and then stays resumed: its context-bank registers do not survive a
+	 * power collapse and resume only redoes the TrustZone half. Nothing
+	 * touches it before: once TrustZone has configured the instance, the
+	 * SoC resets if it is left without an attached domain while more than
+	 * one CPU is running.
+	 */
+	if (!qcom_iommu->nonsecure && qcom_iommu->dev->pm_domain &&
+	    !qcom_iommu->pinned) {
+		pm_runtime_forbid(qcom_iommu->dev);
+		qcom_iommu->pinned = true;
+	}
 
 	mutex_lock(&qcom_domain->init_mutex);
 	if (qcom_domain->iommu) {
@@ -1135,8 +1152,13 @@ static int qcom_iommu_ctx_probe(struct platform_device *pdev)
 	 * boot-loader left us a surprise.  Enable clocks via the parent
 	 * device's PM runtime to avoid unclocked MMSS register accesses
 	 * which cause a bus error on MSM8974.
+	 *
+	 * The MSM8974 TrustZone-managed instance is left alone until its
+	 * first attach, see qcom_iommu_init_domain(); the fault status is
+	 * cleared there before the bank is enabled.
 	 */
-	if (!ctx->secured_ctx) {
+	if (!ctx->secured_ctx &&
+	    !(qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure)) {
 		ret = pm_runtime_resume_and_get(dev->parent);
 		if (ret < 0)
 			return ret;
@@ -1358,23 +1380,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 
 	pm_runtime_enable(dev);
 
-	/*
-	 * A TZ-managed instance behind a power domain (msm8974 MDP SMMU on
-	 * MDSS_GDSC) loses its context-bank registers on power collapse, and
-	 * the resume path only re-runs restore_sec_cfg() -- the TZ/global
-	 * half. Until a per-CB reprogram-on-resume exists, keep the instance
-	 * from runtime-suspending at all. The practical cost is nil for a
-	 * display that scans out continuously (fbcon).
-	 */
-	QTRACE(dev, "before forbid");
-	if (!qcom_iommu->nonsecure && dev->pm_domain)
-		pm_runtime_forbid(dev);
-	QTRACE(dev, "after forbid");
-
-	/* DEBUG (mdp-iommu bring-up): dump CB state 20 s after probe. */
 	INIT_DELAYED_WORK(&qcom_iommu->dbg_work, qcom_iommu_dbg_work);
-	if (qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure)
-		schedule_delayed_work(&qcom_iommu->dbg_work, 20 * HZ);
 
 	/* register context bank devices, which are child nodes: */
 	ret = devm_of_platform_populate(dev);
