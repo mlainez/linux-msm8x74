@@ -168,6 +168,18 @@
 #define SMBB_DERATED_VMAX_UV	4100000
 #define SMBB_DERATED_VDET_UV	4000000
 
+/*
+ * A cycle that does not end. The hardware end-of-charge detection is known to
+ * be inaccurate, and when it misses, the battery is held at the float voltage
+ * until the safety timer latches CHG_FAILED - which the supervisor clears, as
+ * it must for a slow supply that merely needs more than one timer period.
+ * Told apart by the battery voltage: at the float voltage a second period is
+ * not a slow charge, it is a cell being floated for as long as the cable
+ * stays in. Stop, and stay stopped until the input is plugged in again.
+ */
+#define SMBB_FLOAT_MARGIN_UV	50000
+#define SMBB_FLOAT_MAX_MS	(120 * 60 * 1000)
+
 enum smbb_zone {
 	SMBB_ZONE_NORMAL,
 	SMBB_ZONE_COOL,
@@ -257,6 +269,8 @@ struct smbb_charger {
 	struct iio_channel *temp_chan;
 	enum smbb_zone zone;
 	int temp_mc;
+	unsigned long float_since;	/* jiffies, 0 when not at the float voltage */
+	bool term_fault;		/* see SMBB_FLOAT_MAX_MS */
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
@@ -549,7 +563,8 @@ static void smbb_set_line_flag(struct smbb_charger *chg, int irq, int flag)
 #define SMBB_REARM_SETTLE_MS	2000
 #define SMBB_REARM_MAX_MS	300000
 
-static void smbb_clear_gates(struct smbb_charger *chg)
+/* Returns whether the charge-failed latch was set. */
+static bool smbb_clear_gates(struct smbb_charger *chg)
 {
 	static const struct {
 		unsigned int off, mask, val;
@@ -557,6 +572,7 @@ static void smbb_clear_gates(struct smbb_charger *chg)
 		{ SMBB_CHG_CTRL, CTRL_ON_BAT_FORCE, 0 },
 		{ SMBB_USB_SUSP, USB_SUSP_EN, 0 },
 	};
+	bool failed = false;
 	unsigned int reg;
 	int i, rc;
 
@@ -578,7 +594,10 @@ static void smbb_clear_gates(struct smbb_charger *chg)
 			     CHG_FAILED_CLEAR);
 		chg->gate_clear_count++;
 		dev_info(chg->dev, "cleared the charge-failed latch\n");
+		failed = true;
 	}
+
+	return failed;
 }
 
 /*
@@ -748,6 +767,30 @@ static bool smbb_battery_full(struct smbb_charger *chg)
 	return uv >= chg->attr[ATTR_CHG_VDET];
 }
 
+/* The battery sits at the float voltage, as far as can be told. */
+static bool smbb_at_float(struct smbb_charger *chg)
+{
+	int uv;
+
+	if (!chg->vbat_chan ||
+	    iio_read_channel_processed(chg->vbat_chan, &uv) < 0)
+		return false;
+
+	return uv >= (int)chg->attr[ATTR_BAT_VMAX] - SMBB_FLOAT_MARGIN_UV;
+}
+
+static void smbb_term_fault(struct smbb_charger *chg, const char *why)
+{
+	if (chg->term_fault)
+		return;
+
+	chg->term_fault = true;
+	dev_err(chg->dev,
+		"%s: the cycle did not end, not charging until the input is plugged in again\n",
+		why);
+	power_supply_changed(chg->bat_psy);
+}
+
 static const char * const smbb_zone_names[] = {
 	[SMBB_ZONE_NORMAL] = "in range",
 	[SMBB_ZONE_COOL] = "cool",
@@ -841,7 +884,7 @@ static void smbb_engage_work(struct work_struct *work)
 {
 	struct smbb_charger *chg = container_of(work, struct smbb_charger,
 						engage_work.work);
-	bool input, charging, bat_ready, done;
+	bool input, charging, bat_ready, done, failed;
 	unsigned int delay = SMBB_ENGAGE_POLL_MS;
 	const char *mode;
 
@@ -885,7 +928,7 @@ static void smbb_engage_work(struct work_struct *work)
 	 * no battery that is fatal: measured on the carrier rig, boot reset with
 	 * "input collapsed at 100000 uA" moments after g_ether enumerated.
 	 */
-	smbb_clear_gates(chg);
+	failed = smbb_clear_gates(chg);
 
 	if (!input) {
 		/*
@@ -897,6 +940,8 @@ static void smbb_engage_work(struct work_struct *work)
 		chg->rearm_delay_ms = SMBB_ENGAGE_POLL_MS;
 		chg->rearm_not_before = jiffies;
 		chg->rearm_stage = 0;
+		chg->float_since = 0;
+		chg->term_fault = false;
 		/*
 		 * ... but only when there is a battery to fall back on.  With no
 		 * cell, this input is what powers the SoC: if it really is gone
@@ -921,6 +966,22 @@ static void smbb_engage_work(struct work_struct *work)
 	if (smbb_battery_present(chg)) {
 		smbb_set_zone(chg, smbb_read_zone(chg));
 		if (chg->zone >= SMBB_ZONE_COLD)
+			bat_ready = false;
+
+		if (charging && !done && smbb_at_float(chg)) {
+			if (failed)
+				smbb_term_fault(chg, "safety timer at the float voltage");
+			else if (!chg->float_since)
+				chg->float_since = jiffies ?: 1;
+			else if (time_after(jiffies, chg->float_since +
+					    msecs_to_jiffies(SMBB_FLOAT_MAX_MS)))
+				smbb_term_fault(chg, "two hours at the float voltage");
+		} else if (failed && smbb_at_float(chg)) {
+			smbb_term_fault(chg, "safety timer at the float voltage");
+		} else {
+			chg->float_since = 0;
+		}
+		if (chg->term_fault)
 			bat_ready = false;
 	}
 
@@ -1400,7 +1461,9 @@ static int smbb_battery_get_property(struct power_supply *psy,
 			val->intval = POWER_SUPPLY_STATUS_DISCHARGING;
 		break;
 	case POWER_SUPPLY_PROP_HEALTH:
-		if (chg->zone == SMBB_ZONE_UNKNOWN)
+		if (chg->term_fault)
+			val->intval = POWER_SUPPLY_HEALTH_SAFETY_TIMER_EXPIRE;
+		else if (chg->zone == SMBB_ZONE_UNKNOWN)
 			val->intval = POWER_SUPPLY_HEALTH_UNSPEC_FAILURE;
 		else if (chg->zone == SMBB_ZONE_HOT)
 			val->intval = POWER_SUPPLY_HEALTH_OVERHEAT;
@@ -1712,6 +1775,9 @@ static int smbb_state_show(struct seq_file *s, void *data)
 			   smbb_zone_names[chg->zone]);
 	else
 		seq_puts(s, "temperature   no thermistor channel\n");
+	seq_printf(s, "termination   fault=%d at_float_for=%us\n", chg->term_fault,
+		   chg->float_since ?
+		   jiffies_to_msecs(jiffies - chg->float_since) / 1000 : 0);
 	seq_printf(s, "input limit   %u uA (floor %u, ceiling %u, learned %u, collapses %u)\n",
 		   smbb_imax_fn(chg->iusb_idx),
 		   smbb_imax_fn(chg->iusb_floor_idx),
