@@ -87,6 +87,10 @@
 #define QSMMU_MEMATTR_WB		0xa	/* write-back, do not downgrade */
 #define QSMMU_HLOS_VMID			3	/* non-secure HLOS VMID */
 
+/* DEBUG: skip steps of resume: 1 = interconnect vote, 2 = restore_sec_cfg. */
+static unsigned int dbg_skip;
+module_param(dbg_skip, uint, 0644);
+
 /* DEBUG: probe-path trace, to find the step an early boot dies in. */
 #define QTRACE(dev, fmt, ...) \
 	dev_info(dev, "TRACE cpu%d " fmt "\n", raw_smp_processor_id(), ##__VA_ARGS__)
@@ -1286,6 +1290,7 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	struct resource *res;
 	struct clk *clk;
 	int ret, max_asid = 0;
+	bool late_rpm;
 
 	/* find the max asid (which is 1:1 to ctx bank idx), so we know how
 	 * many child ctx devices we have:
@@ -1378,12 +1383,22 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 
 	platform_set_drvdata(pdev, qcom_iommu);
 
-	pm_runtime_enable(dev);
+	/*
+	 * The driver core resumes a parent to probe its children. The MSM8974
+	 * TrustZone-managed instance must not be resumed before its first
+	 * attach, so its runtime PM is only enabled once the context banks
+	 * are there.
+	 */
+	late_rpm = qcom_iommu->is_msm8974 && !qcom_iommu->nonsecure;
+	if (!late_rpm)
+		pm_runtime_enable(dev);
 
 	INIT_DELAYED_WORK(&qcom_iommu->dbg_work, qcom_iommu_dbg_work);
 
 	/* register context bank devices, which are child nodes: */
 	ret = devm_of_platform_populate(dev);
+	if (late_rpm)
+		pm_runtime_enable(dev);
 	if (ret) {
 		dev_err(dev, "Failed to populate iommu contexts\n");
 		goto err_pm_disable;
@@ -1528,7 +1543,7 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	 * where icc_path is NULL (SoCs without an "interconnects" property).
 	 */
 	QTRACE(dev, "resume");
-	if (qcom_iommu->icc_path) {
+	if (qcom_iommu->icc_path && !(dbg_skip & 1)) {
 		ret = icc_set_bw(qcom_iommu->icc_path, 0, MBps_to_icc(150));
 		if (ret)
 			return ret;
@@ -1540,7 +1555,7 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	if (ret < 0)
 		goto err_icc;
 
-	if (dev->pm_domain && !qcom_iommu->nonsecure) {
+	if (dev->pm_domain && !qcom_iommu->nonsecure && !(dbg_skip & 2)) {
 		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
 		QTRACE(dev, "restore_sec_cfg ret=%d", ret);
 		if (ret)
