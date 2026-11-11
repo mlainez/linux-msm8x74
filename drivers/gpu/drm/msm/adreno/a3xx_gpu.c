@@ -109,6 +109,13 @@ static bool a3xx_me_init(struct msm_gpu *gpu)
 	return a3xx_idle(gpu);
 }
 
+static void a3xx_soft_reset(struct msm_gpu *gpu)
+{
+	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 1);
+	gpu_read(gpu, REG_A3XX_RBBM_SW_RESET_CMD);
+	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 0);
+}
+
 static int a3xx_hw_init(struct msm_gpu *gpu)
 {
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
@@ -117,6 +124,14 @@ static int a3xx_hw_init(struct msm_gpu *gpu)
 	int i, ret;
 
 	DBG("%s", gpu->name);
+
+	/*
+	 * The core is only in its reset state after a power cycle of its
+	 * domain. The bootloader hands the domain over switched on, so the
+	 * first init would otherwise program a core in an unknown state and
+	 * the micro engine never drains the ring.
+	 */
+	a3xx_soft_reset(gpu);
 
 	if (adreno_is_a305(adreno_gpu)) {
 		/* Set up 16 deep read/write request queues: */
@@ -361,13 +376,6 @@ static int a3xx_hw_init(struct msm_gpu *gpu)
 	gpu_write(gpu, REG_AXXX_CP_ME_CNTL, 0);
 
 	return a3xx_me_init(gpu) ? 0 : -EINVAL;
-}
-
-static void a3xx_soft_reset(struct msm_gpu *gpu)
-{
-	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 1);
-	gpu_read(gpu, REG_A3XX_RBBM_SW_RESET_CMD);
-	gpu_write(gpu, REG_A3XX_RBBM_SW_RESET_CMD, 0);
 }
 
 static void a3xx_recover(struct msm_gpu *gpu)
