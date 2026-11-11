@@ -595,3 +595,20 @@
 	compatible = "qcom,adreno-330.2", "qcom,adreno";
 	status = "okay";
 };
+
+/*
+ * pstore in RAM, where lk2nd puts it with lk2nd.pass-ramoops and where the
+ * carrier-rig device tree has it: the region survives a warm reset under
+ * U-Boot as well, so a silent reset leaves the console behind.
+ */
+&reserved_memory {
+	ramoops@67f80000 {
+		compatible = "ramoops";
+		reg = <0x67f80000 0x80000>;
+		console-size = <0x40000>;
+		record-size = <0x2000>;
+		ftrace-size = <0>;
+		pmsg-size = <0>;
+		ecc-size = <0>;
+	};
+};
