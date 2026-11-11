@@ -590,3 +590,8 @@
 	hysteresis = <3000>;
 };
 
+
+&gpu {
+	compatible = "qcom,adreno-330.2", "qcom,adreno";
+	status = "okay";
+};
