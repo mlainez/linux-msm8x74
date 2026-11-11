@@ -203,6 +203,17 @@
  */
 &smbb {
 	qcom,minimum-input-voltage = <4300000>;
+
+	/*
+	 * There is no cell to charge, and the terminals may be fed by a bench
+	 * supply. The charge path has to stay armed - it is how the input
+	 * reaches the system - so the only software bound on what could be
+	 * pushed into the terminals, should the PMIC ever take them for a
+	 * battery, is the charge current. Keep it at the minimum. It limits
+	 * the current into the battery node, not what the system may draw.
+	 */
+	qcom,fast-charge-safe-current = <200000>;
+	qcom,fast-charge-current-limit = <200000>;
 };
 
 /*
