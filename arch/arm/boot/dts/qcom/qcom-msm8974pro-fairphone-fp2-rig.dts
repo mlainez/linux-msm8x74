@@ -214,6 +214,13 @@
 	 */
 	qcom,fast-charge-safe-current = <200000>;
 	qcom,fast-charge-current-limit = <200000>;
+
+	/*
+	 * And say so: with the thermistor line open, a glitch on the presence
+	 * detection would otherwise read as a battery of unknown temperature,
+	 * and stopping its charge switches this board off.
+	 */
+	qcom,no-battery;
 };
 
 /*
