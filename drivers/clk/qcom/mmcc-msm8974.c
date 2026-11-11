@@ -2748,10 +2748,29 @@ static void msm8226_clock_override(void)
 	cpp_clk_src.freq_tbl = ftbl_camss_vfe_cpp_clk_msm8226;
 }
 
+/* DEBUG: dsi_parent_enable=0 drops CLK_OPS_PARENT_ENABLE again, for an A/B. */
+static bool dsi_parent_enable = true;
+module_param(dsi_parent_enable, bool, 0444);
+
+static void mmcc_msm8974_dsi_parent_enable_off(void)
+{
+	struct clk_rcg2 *rcgs[] = {
+		&pclk0_clk_src, &pclk1_clk_src, &byte0_clk_src, &byte1_clk_src,
+	};
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(rcgs); i++)
+		((struct clk_init_data *)rcgs[i]->clkr.hw.init)->flags &=
+			~CLK_OPS_PARENT_ENABLE;
+}
+
 static int mmcc_msm8974_probe(struct platform_device *pdev)
 {
 	struct regmap *regmap;
 	const struct qcom_cc_desc *desc;
+
+	if (!dsi_parent_enable)
+		mmcc_msm8974_dsi_parent_enable_off();
 
 	desc = of_device_get_match_data(&pdev->dev);
 	if (!desc)
