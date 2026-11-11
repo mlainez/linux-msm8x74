@@ -6,11 +6,13 @@
 
 #include <linux/cleanup.h>
 #include <linux/clk-provider.h>
+#include <linux/delay.h>
 #include <linux/err.h>
 #include <linux/export.h>
 #include <linux/init.h>
 #include <linux/kernel.h>
 #include <linux/module.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/platform_device.h>
@@ -1347,6 +1349,13 @@ static void rpm_smd_unregister_icc(void *data)
 	platform_device_unregister(icc_pdev);
 }
 
+/*
+ * DEBUG: the msm8974 community tree delays this probe by 200 ms ("HACK: delay
+ * rpmcc init"); make that delay selectable at boot to measure what it changes.
+ */
+static unsigned int probe_delay_ms;
+module_param(probe_delay_ms, uint, 0444);
+
 static int rpm_smd_clk_probe(struct platform_device *pdev)
 {
 	int ret;
@@ -1367,6 +1376,9 @@ static int rpm_smd_clk_probe(struct platform_device *pdev)
 
 	rpm_smd_clks = desc->clks;
 	num_clks = desc->num_clks;
+
+	if (probe_delay_ms)
+		msleep(probe_delay_ms);
 
 	if (desc->scaling_before_handover) {
 		ret = clk_smd_rpm_enable_scaling();
