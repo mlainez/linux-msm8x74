@@ -286,6 +286,7 @@ struct smbb_charger {
 	unsigned long float_since;	/* jiffies, 0 when not at the float voltage */
 	bool term_fault;		/* see SMBB_FLOAT_MAX_MS */
 	unsigned int low_count;		/* consecutive readings under the cut-off */
+	unsigned int arb_stage;		/* reverse-boost response, see the supervisor */
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
@@ -1001,6 +1002,42 @@ static void smbb_engage_work(struct work_struct *work)
 			dev_dbg(chg->dev, "input gone, supervisor idle\n");
 			chg->was_charging = false;
 		}
+		/*
+		 * Reverse boost. Hardware termination of it is switched off in
+		 * the setup table, as the vendor does, which leaves the response
+		 * to software: with the input gone but the buck still running -
+		 * USB_RT_VALID stays set next to CHG_GONE - it runs backwards
+		 * from the battery and holds the input pin up. The vendor
+		 * switches charging off and forces the system onto the battery
+		 * for a second, then re-enables charging; do that, once per
+		 * removal. The next pass lifts the force with the other gates.
+		 */
+		if (smbb_battery_present(chg) && !smbb_otg_enabled(chg)) {
+			unsigned int usb = 0;
+
+			regmap_read(chg->regmap, chg->addr + SMBB_USB_RT_STS,
+				    &usb);
+			if (chg->arb_stage == 1) {
+				regmap_update_bits(chg->regmap,
+						   chg->addr + SMBB_CHG_CTRL,
+						   CTRL_EN, CTRL_EN);
+				chg->arb_stage = 2;
+			} else if (!chg->arb_stage &&
+				   (usb & USB_RT_CHG_GONE) &&
+				   (usb & USB_RT_VALID)) {
+				dev_info(chg->dev,
+					 "input gone with the charger still running: pausing it\n");
+				regmap_update_bits(chg->regmap,
+						   chg->addr + SMBB_CHG_CTRL,
+						   CTRL_EN | CTRL_ON_BAT_FORCE,
+						   CTRL_ON_BAT_FORCE);
+				chg->arb_stage = 1;
+				schedule_delayed_work(&chg->engage_work,
+						      msecs_to_jiffies(1000));
+				return;
+			}
+		}
+
 		/* An insertion interrupt brings us back sooner than this. */
 		delay = smbb_watch_low_battery(chg);
 		if (delay)
@@ -1009,6 +1046,7 @@ static void smbb_engage_work(struct work_struct *work)
 		return;
 	}
 	chg->low_count = 0;
+	chg->arb_stage = 0;
 
 	/*
 	 * Battery temperature, before anything below can arm the path. Only
