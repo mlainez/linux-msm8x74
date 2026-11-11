@@ -617,6 +617,21 @@ static bool smbb_clear_gates(struct smbb_charger *chg)
 }
 
 /*
+ * Is the OTG boost driving VBUS?  That bit is the kernel's own record of being
+ * in host mode: the USB controller asks for vbus-supply (chg_otg) when the ID
+ * pin says a peripheral is attached, and the boost then makes 5 V out of VPH -
+ * a LOAD on the supply, not a source.
+ */
+static bool smbb_otg_enabled(struct smbb_charger *chg)
+{
+	unsigned int val = 0;
+
+	regmap_read(chg->regmap, chg->addr + SMBB_USB_OTG_CTL, &val);
+
+	return val & OTG_CTL_EN;
+}
+
+/*
  * Read the charge path straight out of the hardware.  Decisions here must
  * not depend on the cached status word: see the RT_STS comment above.
  */
@@ -644,25 +659,17 @@ static void smbb_hw_state(struct smbb_charger *chg, bool *input,
 	if (usb & USB_RT_CHG_GONE)
 		usb &= ~USB_RT_VALID;
 
+	/*
+	 * Hosting: the 5 V on the connector is our own boost, made from the
+	 * battery. It is not an input, and nothing may try to charge from it.
+	 */
+	if (smbb_otg_enabled(chg))
+		usb &= ~USB_RT_VALID;
+
 	*input = (usb & USB_RT_VALID) || (dc & DC_RT_VALID);
 	*charging = *input && (chgr & (CHG_RT_FAST_ON | CHG_RT_TRKL_ON));
 	*bat_ready = (bat & BAT_RT_PRESENT) && (bat & BAT_RT_TEMP_OK);
 	*done = chgr & CHG_RT_CHG_DONE;
-}
-
-/*
- * Is the OTG boost driving VBUS?  That bit is the kernel's own record of being
- * in host mode: the USB controller asks for vbus-supply (chg_otg) when the ID
- * pin says a peripheral is attached, and the boost then makes 5 V out of VPH -
- * a LOAD on the supply, not a source.
- */
-static bool smbb_otg_enabled(struct smbb_charger *chg)
-{
-	unsigned int val = 0;
-
-	regmap_read(chg->regmap, chg->addr + SMBB_USB_OTG_CTL, &val);
-
-	return val & OTG_CTL_EN;
 }
 
 /*
