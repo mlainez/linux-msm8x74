@@ -87,6 +87,10 @@
 #define QSMMU_MEMATTR_WB		0xa	/* write-back, do not downgrade */
 #define QSMMU_HLOS_VMID			3	/* non-secure HLOS VMID */
 
+/* DEBUG: probe-path trace, to find the step an early boot dies in. */
+#define QTRACE(dev, fmt, ...) \
+	dev_info(dev, "TRACE cpu%d " fmt "\n", raw_smp_processor_id(), ##__VA_ARGS__)
+
 enum qcom_iommu_clk {
 	CLK_IFACE,
 	CLK_BUS,
@@ -1058,6 +1062,7 @@ static int qcom_iommu_sec_ptbl_init(struct device *dev)
 	attrs = DMA_ATTR_NO_KERNEL_MAPPING;
 
 	cpu_addr = dma_alloc_attrs(dev, psize, &paddr, GFP_KERNEL, attrs);
+	QTRACE(dev, "pool alloc %pad", &paddr);
 	if (!cpu_addr) {
 		dev_err(dev, "failed to allocate %zu bytes for pgtable\n",
 			psize);
@@ -1065,6 +1070,7 @@ static int qcom_iommu_sec_ptbl_init(struct device *dev)
 	}
 
 	ret = qcom_scm_iommu_secure_ptbl_init(paddr, psize, spare);
+	QTRACE(dev, "pool init ret=%d", ret);
 	if (ret) {
 		dev_err(dev, "failed to init iommu pgtable (%d)\n", ret);
 		goto free_mem;
@@ -1136,7 +1142,9 @@ static int qcom_iommu_ctx_probe(struct platform_device *pdev)
 		ret = pm_runtime_resume_and_get(dev->parent);
 		if (ret < 0)
 			return ret;
+		QTRACE(dev, "ctx FSR access");
 		iommu_writel(ctx, ARM_SMMU_CB_FSR, iommu_readl(ctx, ARM_SMMU_CB_FSR));
+		QTRACE(dev, "ctx FSR done");
 		pm_runtime_put_sync(dev->parent);
 	}
 
@@ -1212,10 +1220,8 @@ static bool qcom_iommu_has_secure_context(struct qcom_iommu_dev *qcom_iommu)
  * after attach so we can see whether the bank is actually in the
  * translation path (SCTLR.M, our TTBR0) and whether anything faulted.
  */
-static void qcom_iommu_dbg_work(struct work_struct *work)
+static void qcom_iommu_dbg_dump(struct qcom_iommu_dev *qcom_iommu)
 {
-	struct qcom_iommu_dev *qcom_iommu =
-		container_of(to_delayed_work(work), struct qcom_iommu_dev, dbg_work);
 	int i;
 
 	if (pm_runtime_resume_and_get(qcom_iommu->dev) < 0)
@@ -1227,9 +1233,10 @@ static void qcom_iommu_dbg_work(struct work_struct *work)
 		if (!ctx)
 			continue;
 		dev_info(qcom_iommu->dev,
-			 "DBG ctx asid=%d domain=%d SCTLR=%08x TTBR0=%08x%08x TCR=%08x FSR=%08x FAR=%08x%08x\n",
+			 "DBG ctx asid=%d domain=%d SCTLR=%08x ACTLR=%08x TTBR0=%08x%08x TCR=%08x FSR=%08x FAR=%08x%08x\n",
 			 ctx->asid, ctx->domain != NULL,
 			 iommu_readl(ctx, ARM_SMMU_CB_SCTLR),
+			 iommu_readl(ctx, ARM_SMMU_CB_ACTLR),
 			 (u32)(iommu_readq(ctx, ARM_SMMU_CB_TTBR0) >> 32),
 			 (u32)iommu_readq(ctx, ARM_SMMU_CB_TTBR0),
 			 iommu_readl(ctx, ARM_SMMU_CB_TCR),
@@ -1240,6 +1247,31 @@ static void qcom_iommu_dbg_work(struct work_struct *work)
 
 	pm_runtime_put(qcom_iommu->dev);
 }
+
+static void qcom_iommu_dbg_work(struct work_struct *work)
+{
+	qcom_iommu_dbg_dump(container_of(to_delayed_work(work),
+					 struct qcom_iommu_dev, dbg_work));
+}
+
+/* DEBUG: "echo 1 > /sys/module/qcom_iommu/parameters/dump" dumps every bank. */
+static struct qcom_iommu_dev *qcom_iommu_dbg_devs[4];
+
+static int qcom_iommu_dbg_dump_set(const char *val, const struct kernel_param *kp)
+{
+	int i;
+
+	for (i = 0; i < ARRAY_SIZE(qcom_iommu_dbg_devs); i++)
+		if (qcom_iommu_dbg_devs[i])
+			qcom_iommu_dbg_dump(qcom_iommu_dbg_devs[i]);
+
+	return 0;
+}
+
+static const struct kernel_param_ops qcom_iommu_dbg_dump_ops = {
+	.set = qcom_iommu_dbg_dump_set,
+};
+module_param_cb(dump, &qcom_iommu_dbg_dump_ops, NULL, 0200);
 
 static int qcom_iommu_device_probe(struct platform_device *pdev)
 {
@@ -1351,8 +1383,10 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	 * from runtime-suspending at all. The practical cost is nil for a
 	 * display that scans out continuously (fbcon).
 	 */
+	QTRACE(dev, "before forbid");
 	if (!qcom_iommu->nonsecure && dev->pm_domain)
 		pm_runtime_forbid(dev);
+	QTRACE(dev, "after forbid");
 
 	/* DEBUG (mdp-iommu bring-up): dump CB state 20 s after probe. */
 	INIT_DELAYED_WORK(&qcom_iommu->dbg_work, qcom_iommu_dbg_work);
@@ -1373,7 +1407,18 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 		goto err_pm_disable;
 	}
 
+	QTRACE(dev, "children populated");
 	ret = iommu_device_register(&qcom_iommu->iommu, &qcom_iommu_ops, dev);
+	QTRACE(dev, "registered ret=%d", ret);
+	if (!ret) {
+		int i;
+
+		for (i = 0; i < ARRAY_SIZE(qcom_iommu_dbg_devs); i++)
+			if (!qcom_iommu_dbg_devs[i]) {
+				qcom_iommu_dbg_devs[i] = qcom_iommu;
+				break;
+			}
+	}
 	if (ret) {
 		dev_err(dev, "Failed to register iommu\n");
 		goto err_sysfs_remove;
@@ -1493,18 +1538,22 @@ static int __maybe_unused qcom_iommu_resume(struct device *dev)
 	 * register access raises a NoC/xPU error that resets the SoC. No-op
 	 * where icc_path is NULL (SoCs without an "interconnects" property).
 	 */
+	QTRACE(dev, "resume");
 	if (qcom_iommu->icc_path) {
 		ret = icc_set_bw(qcom_iommu->icc_path, 0, MBps_to_icc(150));
 		if (ret)
 			return ret;
 	}
+	QTRACE(dev, "icc voted");
 
 	ret = clk_bulk_prepare_enable(CLK_NUM, qcom_iommu->clks);
+	QTRACE(dev, "clocks on ret=%d", ret);
 	if (ret < 0)
 		goto err_icc;
 
 	if (dev->pm_domain && !qcom_iommu->nonsecure) {
 		ret = qcom_scm_restore_sec_cfg(qcom_iommu->sec_id, 0);
+		QTRACE(dev, "restore_sec_cfg ret=%d", ret);
 		if (ret)
 			goto err_clk;
 	}
