@@ -27,6 +27,97 @@ extern bool hang_debug;
 
 static void a3xx_dump(struct msm_gpu *gpu);
 static bool a3xx_idle(struct msm_gpu *gpu);
+static void a3xx_soft_reset(struct msm_gpu *gpu);
+
+/* DEBUG: bit0 retry init in place, bit1 sleep first, bit2 reset first, bit3 dump always */
+static unsigned int a3xx_dbg;
+module_param_named(a3xx_dbg, a3xx_dbg, uint, 0644);
+
+static void a3xx_dbg_dump(struct msm_gpu *gpu, const char *when)
+{
+	struct msm_ringbuffer *ring = gpu->rb[0];
+	void __iomem *smmu;
+	u32 roq[32];
+	int i;
+
+	pr_info("a3xx-dbg[%s]: rb_base=%08x cntl=%08x rptr=%x wptr=%x me_cntl=%08x me_stat=%08x cp_stat=%08x rbbm=%08x int0=%08x cp_int=%08x csq_rb=%08x csq_avail=%08x ib1=%08x/%x iova=%llx\n",
+		when,
+		gpu_read(gpu, REG_AXXX_CP_RB_BASE),
+		gpu_read(gpu, REG_AXXX_CP_RB_CNTL),
+		gpu_read(gpu, REG_AXXX_CP_RB_RPTR),
+		gpu_read(gpu, REG_AXXX_CP_RB_WPTR),
+		gpu_read(gpu, REG_AXXX_CP_ME_CNTL),
+		gpu_read(gpu, REG_AXXX_CP_ME_STATUS),
+		gpu_read(gpu, REG_AXXX_CP_STAT),
+		gpu_read(gpu, REG_A3XX_RBBM_STATUS),
+		gpu_read(gpu, REG_A3XX_RBBM_INT_0_STATUS),
+		gpu_read(gpu, REG_AXXX_CP_INT_STATUS),
+		gpu_read(gpu, REG_AXXX_CP_CSQ_RB_STAT),
+		gpu_read(gpu, REG_AXXX_CP_CSQ_AVAIL),
+		gpu_read(gpu, REG_AXXX_CP_IB1_BASE),
+		gpu_read(gpu, REG_AXXX_CP_IB1_BUFSZ),
+		ring->iova);
+	{
+		u32 v0, v1, v2, s0, s1, s2, s3;
+
+		v0 = gpu_read(gpu, 0x000);
+		v1 = gpu_read(gpu, 0x000);
+		v2 = gpu_read(gpu, 0x001);
+		gpu_write(gpu, REG_AXXX_CP_SCRATCH_REG4, 0x11112222);
+		gpu_write(gpu, REG_AXXX_CP_SCRATCH_REG5, 0x33334444);
+		s0 = gpu_read(gpu, REG_AXXX_CP_SCRATCH_REG4);
+		s1 = gpu_read(gpu, REG_AXXX_CP_SCRATCH_REG5);
+		s2 = gpu_read(gpu, REG_AXXX_CP_SCRATCH_REG4);
+		s3 = gpu_read(gpu, REG_AXXX_CP_SCRATCH_REG5);
+		pr_info("a3xx-dbg[%s]: hwver=%08x,%08x rel=%08x scratch4/5 rb=%08x %08x %08x %08x\n",
+			when, v0, v1, v2, s0, s1, s2, s3);
+	}
+	for (i = 0; i < 3; i++) {
+		usleep_range(1000, 1500);
+		pr_info("a3xx-dbg[%s]: +%dms rptr=%x cp_stat=%08x rbbm=%08x\n", when, i + 1,
+			gpu_read(gpu, REG_AXXX_CP_RB_RPTR),
+			gpu_read(gpu, REG_AXXX_CP_STAT),
+			gpu_read(gpu, REG_A3XX_RBBM_STATUS));
+	}
+	print_hex_dump(KERN_INFO, "a3xx-dbg ring: ", DUMP_PREFIX_OFFSET, 32, 4,
+		       ring->start, 96, false);
+	for (i = 0; i < ARRAY_SIZE(roq); i++) {
+		gpu_write(gpu, 0x1cc, i);
+		roq[i] = gpu_read(gpu, 0x1cd);
+	}
+	print_hex_dump(KERN_INFO, "a3xx-dbg roq:  ", DUMP_PREFIX_OFFSET, 32, 4,
+		       roq, sizeof(roq), false);
+
+	smmu = ioremap(0xfd8c4000, 0x2000);
+	if (smmu) {
+		pr_info("a3xx-dbg[%s] mmcc: oxili_gdsc=%08x oxilicx_gdsc=%08x gfx3d_cbcr=%08x axi=%08x ahb=%08x rcg=%08x/%08x mmssnoc_ahb=%08x s0_axi=%08x mmssnoc_axi=%08x ocmemnoc=%08x\n",
+			when, readl(smmu + 0x24), readl(smmu + 0x34),
+			readl(smmu + 0x28), readl(smmu + 0x38),
+			readl(smmu + 0x3c), readl(smmu), readl(smmu + 4),
+			readl(smmu + 0x1024), readl(smmu + 0x1064),
+			readl(smmu + 0x106c), readl(smmu + 0x10b4));
+		iounmap(smmu);
+	}
+
+	smmu = ioremap(0xfdb10000, 0xb000);
+	if (!smmu)
+		return;
+	pr_info("a3xx-dbg smmu: cr0=%08x gfsr=%08x gfar=%08x mmuctl=%08x smr=%08x,%08x,%08x s2cr=%08x,%08x,%08x cbar=%08x,%08x,%08x\n",
+		readl(smmu), readl(smmu + 0x48), readl(smmu + 0x40),
+		readl(smmu + 0x2000),
+		readl(smmu + 0x800), readl(smmu + 0x804), readl(smmu + 0x808),
+		readl(smmu + 0xc00), readl(smmu + 0xc04), readl(smmu + 0xc08),
+		readl(smmu + 0x1000), readl(smmu + 0x1004), readl(smmu + 0x1008));
+	for (i = 0; i < 3; i++) {
+		void __iomem *cb = smmu + 0x8000 + i * 0x1000;
+
+		pr_info("a3xx-dbg cb%d: sctlr=%08x ttbr0=%08x:%08x tcr=%08x mair=%08x fsr=%08x far=%08x fsynr0=%08x\n",
+			i, readl(cb), readl(cb + 0x24), readl(cb + 0x20),
+			readl(cb + 0x30), readl(cb + 0x38), readl(cb + 0x58),
+			readl(cb + 0x60), readl(cb + 0x68));
+	}
+	iounmap(smmu);
+}
 
 static void a3xx_submit(struct msm_gpu *gpu, struct msm_gem_submit *submit)
 {
@@ -109,7 +200,7 @@ static bool a3xx_me_init(struct msm_gpu *gpu)
 	return a3xx_idle(gpu);
 }
 
-static int a3xx_hw_init(struct msm_gpu *gpu)
+static int a3xx_hw_init_once(struct msm_gpu *gpu)
 {
 	struct adreno_gpu *adreno_gpu = to_adreno_gpu(gpu);
 	struct a3xx_gpu *a3xx_gpu = to_a3xx_gpu(adreno_gpu);
@@ -357,10 +448,38 @@ static int a3xx_hw_init(struct msm_gpu *gpu)
 		gpu_write(gpu, REG_AXXX_CP_QUEUE_THRESHOLDS, 0x003e2008);
 	}
 
+	if (a3xx_dbg & 8)
+		a3xx_dbg_dump(gpu, "pre");
+
 	/* clear ME_HALT to start micro engine */
 	gpu_write(gpu, REG_AXXX_CP_ME_CNTL, 0);
 
-	return a3xx_me_init(gpu) ? 0 : -EINVAL;
+	if (a3xx_me_init(gpu)) {
+		if (a3xx_dbg & 8)
+			a3xx_dbg_dump(gpu, "ok");
+		return 0;
+	}
+	a3xx_dbg_dump(gpu, "fail");
+
+	return -EINVAL;
+}
+
+static int a3xx_hw_init(struct msm_gpu *gpu)
+{
+	int ret, try = 0;
+
+	do {
+		if (a3xx_dbg & 2)
+			msleep(200);
+		if ((a3xx_dbg & 4) || try)
+			a3xx_soft_reset(gpu);
+		if (a3xx_dbg & 8)
+			a3xx_dbg_dump(gpu, "entry");
+		ret = a3xx_hw_init_once(gpu);
+		pr_info("a3xx-dbg: hw_init try %d -> %d\n", try, ret);
+	} while (ret && (a3xx_dbg & 1) && ++try < 3);
+
+	return ret;
 }
 
 static void a3xx_soft_reset(struct msm_gpu *gpu)
