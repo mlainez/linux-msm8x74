@@ -21,6 +21,7 @@
 #include <linux/kconfig.h>
 #include <linux/init.h>
 #include <linux/interconnect.h>
+#include <linux/moduleparam.h>
 #include <linux/mutex.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
@@ -1208,6 +1209,14 @@ static void qcom_iommu_dbg_work(struct work_struct *work)
 	pm_runtime_put(qcom_iommu->dev);
 }
 
+/*
+ * DEBUG: give TrustZone its page-table pool for every instance that has a
+ * secure id, as the vendor kernel does, not only for those that declare a
+ * secure context bank.
+ */
+static bool force_sec_pool;
+module_param(force_sec_pool, bool, 0444);
+
 static int qcom_iommu_device_probe(struct platform_device *pdev)
 {
 	struct device_node *child;
@@ -1291,7 +1300,8 @@ static int qcom_iommu_device_probe(struct platform_device *pdev)
 	qcom_iommu->is_msm8974 = of_device_is_compatible(dev->of_node,
 							 "qcom,msm8974-iommu");
 
-	if (qcom_iommu_has_secure_context(qcom_iommu)) {
+	if (qcom_iommu_has_secure_context(qcom_iommu) ||
+	    (force_sec_pool && !qcom_iommu->nonsecure)) {
 		ret = qcom_iommu_sec_ptbl_init(dev);
 		if (ret) {
 			dev_err(dev, "cannot init secure pg table(%d)\n", ret);
