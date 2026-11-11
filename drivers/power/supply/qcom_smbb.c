@@ -17,6 +17,7 @@
  */
 
 #include <linux/debugfs.h>
+#include <linux/devm-helpers.h>
 #include <linux/errno.h>
 #include <linux/interrupt.h>
 #include <linux/kernel.h>
@@ -1609,7 +1610,34 @@ static int smbb_charger_probe(struct platform_device *pdev)
 
 	chg->dev = &pdev->dev;
 	mutex_init(&chg->statlock);
-	INIT_DELAYED_WORK(&chg->engage_work, smbb_engage_work);
+
+	/*
+	 * Optional: a battery-voltage channel lets the supervisor recognise a
+	 * full battery instead of retrying against the recharge comparator.
+	 *
+	 * Its provider may not be bound yet. Defer here, before anything is
+	 * registered or written: the interrupt handlers below start the
+	 * supervisor, which drives the charge path enable, and on a board
+	 * without a battery that path is the system supply.
+	 */
+	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
+	if (IS_ERR(chg->vbat_chan)) {
+		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
+			return -EPROBE_DEFER;
+		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
+		chg->vbat_chan = NULL;
+	}
+
+	/*
+	 * The supervisor requeues itself and is kicked from the interrupt
+	 * handlers: it must not outlive chg on a failed probe or an unbind.
+	 * Registered before the interrupts, so it is cancelled after they are
+	 * released.
+	 */
+	rc = devm_delayed_work_autocancel(&pdev->dev, &chg->engage_work,
+					  smbb_engage_work);
+	if (rc)
+		return rc;
 
 	chg->regmap = dev_get_regmap(pdev->dev.parent, NULL);
 	if (!chg->regmap) {
@@ -1812,18 +1840,6 @@ static int smbb_charger_probe(struct platform_device *pdev)
 	 * driver on this board.  See the BPD/VREF entries in the setup
 	 * table for why arming comparators here is unsafe.
 	 */
-
-	/*
-	 * Optional: a battery-voltage channel lets the supervisor recognise a
-	 * full battery instead of retrying against the recharge comparator.
-	 */
-	chg->vbat_chan = devm_iio_channel_get(&pdev->dev, "vbat");
-	if (IS_ERR(chg->vbat_chan)) {
-		if (PTR_ERR(chg->vbat_chan) == -EPROBE_DEFER)
-			return -EPROBE_DEFER;
-		dev_dbg(&pdev->dev, "no vbat channel: %pe\n", chg->vbat_chan);
-		chg->vbat_chan = NULL;
-	}
 
 	/*
 	 * Clear the sticky gates before the setup table enables charging:
