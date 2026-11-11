@@ -905,6 +905,11 @@ static const char * const smbb_zone_names[] = {
 	[SMBB_ZONE_UNKNOWN] = "of unknown temperature",
 };
 
+/* DEBUG: pretend the battery is at this temperature, to exercise the zones. */
+#define SMBB_NO_OVERRIDE	(-999999)
+static int temp_override_mc = SMBB_NO_OVERRIDE;
+module_param(temp_override_mc, int, 0644);
+
 static enum smbb_zone smbb_read_zone(struct smbb_charger *chg)
 {
 	int cold = SMBB_TEMP_COLD_MC, cool = SMBB_TEMP_COOL_MC;
@@ -915,6 +920,10 @@ static enum smbb_zone smbb_read_zone(struct smbb_charger *chg)
 		return SMBB_ZONE_NORMAL;
 
 	rc = iio_read_channel_processed(chg->temp_chan, &t);
+	if (temp_override_mc != SMBB_NO_OVERRIDE) {
+		t = temp_override_mc;
+		rc = 0;
+	}
 	if (rc < 0 || t <= SMBB_TEMP_MIN_MC || t >= SMBB_TEMP_MAX_MC) {
 		/* one bad conversion is not a verdict, two in a row are */
 		if (++chg->temp_errors < 2)
