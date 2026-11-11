@@ -540,3 +540,19 @@
 &mdp_iommu {
 	status = "okay";
 };
+
+/*
+ * DEBUG: pstore in RAM at a fixed address, so that the console of a boot that
+ * reset can be read back from U-Boot (console zone at 0x67fc0000).
+ */
+&reserved_memory {
+	ramoops@67f80000 {
+		compatible = "ramoops";
+		reg = <0x67f80000 0x80000>;
+		console-size = <0x40000>;
+		record-size = <0x2000>;
+		ftrace-size = <0>;
+		pmsg-size = <0>;
+		ecc-size = <0>;
+	};
+};
