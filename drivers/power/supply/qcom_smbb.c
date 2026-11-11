@@ -30,6 +30,7 @@
 #include <linux/slab.h>
 #include <linux/extcon-provider.h>
 #include <linux/iio/consumer.h>
+#include <linux/reboot.h>
 #include <linux/regulator/driver.h>
 #include <linux/seq_file.h>
 #include <linux/workqueue.h>
@@ -180,6 +181,19 @@
 #define SMBB_FLOAT_MARGIN_UV	50000
 #define SMBB_FLOAT_MAX_MS	(120 * 60 * 1000)
 
+/*
+ * Running from the battery. Nothing else in this kernel stops the phone before
+ * the PMIC undervoltage lockout, well under the 3.4 V at which the vendor
+ * kernel shuts down, and a lithium-ion cell is damaged by being run that low
+ * as a matter of routine. A reading under SMBB_VBAT_SANE_UV is an open sense
+ * line, not a cell.
+ */
+#define SMBB_VBAT_CUTOFF_UV	3400000
+#define SMBB_VBAT_SANE_UV	2000000
+#define SMBB_VBAT_LOW_COUNT	3
+#define SMBB_VBAT_LOW_POLL_MS	20000
+#define SMBB_VBAT_IDLE_POLL_MS	60000
+
 enum smbb_zone {
 	SMBB_ZONE_NORMAL,
 	SMBB_ZONE_COOL,
@@ -271,6 +285,7 @@ struct smbb_charger {
 	int temp_mc;
 	unsigned long float_since;	/* jiffies, 0 when not at the float voltage */
 	bool term_fault;		/* see SMBB_FLOAT_MAX_MS */
+	unsigned int low_count;		/* consecutive readings under the cut-off */
 	struct dentry *debugfs;
 
 	unsigned int attr[_ATTR_CNT];
@@ -791,6 +806,37 @@ static void smbb_term_fault(struct smbb_charger *chg, const char *why)
 	power_supply_changed(chg->bat_psy);
 }
 
+/*
+ * Watch a discharging battery. Returns the delay to the next look, 0 when
+ * there is nothing to watch.
+ */
+static unsigned int smbb_watch_low_battery(struct smbb_charger *chg)
+{
+	int uv;
+
+	if (!chg->vbat_chan || !smbb_battery_present(chg))
+		return 0;
+
+	if (iio_read_channel_processed(chg->vbat_chan, &uv) < 0)
+		return SMBB_VBAT_IDLE_POLL_MS;
+
+	if (uv < SMBB_VBAT_SANE_UV || uv >= SMBB_VBAT_CUTOFF_UV) {
+		chg->low_count = 0;
+		return uv < SMBB_VBAT_CUTOFF_UV + 200000 ?
+		       SMBB_VBAT_LOW_POLL_MS : SMBB_VBAT_IDLE_POLL_MS;
+	}
+
+	if (++chg->low_count >= SMBB_VBAT_LOW_COUNT) {
+		dev_emerg(chg->dev,
+			  "battery at %d uV, under the %d uV cut-off: powering off\n",
+			  uv, SMBB_VBAT_CUTOFF_UV);
+		orderly_poweroff(true);
+		return SMBB_VBAT_IDLE_POLL_MS;
+	}
+
+	return SMBB_VBAT_LOW_POLL_MS;
+}
+
 static const char * const smbb_zone_names[] = {
 	[SMBB_ZONE_NORMAL] = "in range",
 	[SMBB_ZONE_COOL] = "cool",
@@ -955,8 +1001,14 @@ static void smbb_engage_work(struct work_struct *work)
 			dev_dbg(chg->dev, "input gone, supervisor idle\n");
 			chg->was_charging = false;
 		}
-		return;	/* an insertion IRQ reschedules us */
+		/* An insertion interrupt brings us back sooner than this. */
+		delay = smbb_watch_low_battery(chg);
+		if (delay)
+			schedule_delayed_work(&chg->engage_work,
+					      msecs_to_jiffies(delay));
+		return;
 	}
+	chg->low_count = 0;
 
 	/*
 	 * Battery temperature, before anything below can arm the path. Only
@@ -1480,6 +1532,14 @@ static int smbb_battery_get_property(struct power_supply *psy,
 		else
 			val->intval = POWER_SUPPLY_HEALTH_GOOD;
 		break;
+	case POWER_SUPPLY_PROP_VOLTAGE_NOW:
+		if (!chg->vbat_chan)
+			return -ENODATA;
+		rc = iio_read_channel_processed(chg->vbat_chan, &val->intval);
+		if (rc < 0)
+			return rc;
+		rc = 0;
+		break;
 	case POWER_SUPPLY_PROP_TEMP:
 		if (!chg->temp_chan)
 			return -ENODATA;
@@ -1514,7 +1574,7 @@ static int smbb_battery_get_property(struct power_supply *psy,
 		val->intval = POWER_SUPPLY_TECHNOLOGY_LION;
 		break;
 	case POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN:
-		val->intval = 3000000; /* single-cell li-ion low end */
+		val->intval = SMBB_VBAT_CUTOFF_UV;
 		break;
 	default:
 		rc = -EINVAL;
@@ -1586,6 +1646,7 @@ static enum power_supply_property smbb_battery_properties[] = {
 	POWER_SUPPLY_PROP_VOLTAGE_MIN_DESIGN,
 	POWER_SUPPLY_PROP_TECHNOLOGY,
 	POWER_SUPPLY_PROP_TEMP,
+	POWER_SUPPLY_PROP_VOLTAGE_NOW,
 };
 
 static const struct reg_off_mask_default {
