@@ -125,6 +125,7 @@ struct spm_driver_data {
 	 */
 	unsigned int vdd_writes;
 	unsigned int vdd_timeouts;
+	unsigned int vdd_failures;
 	struct dentry *debugfs;
 	int reg_cpu;
 	/*
@@ -432,6 +433,7 @@ enum {
 	SPM_EV_FREQ_POST,	/* arg: new MHz */
 	SPM_EV_VDD_BEGIN,	/* arg: selector */
 	SPM_EV_VDD_END,		/* arg: selector */
+	SPM_EV_STUCK,		/* arg: cores still inside a collapse */
 	SPM_EV_NR,
 };
 
@@ -441,6 +443,7 @@ static const char *const spm_ev_names[SPM_EV_NR] = {
 	[SPM_EV_DRAINED] = "drained", [SPM_EV_UNBLOCK] = "unblock",
 	[SPM_EV_FREQ_PRE] = "freq-pre", [SPM_EV_FREQ_POST] = "freq-post",
 	[SPM_EV_VDD_BEGIN] = "vdd-begin", [SPM_EV_VDD_END] = "vdd-end",
+	[SPM_EV_STUCK] = "stuck",
 };
 
 struct spm_trace_ev {
@@ -511,7 +514,7 @@ static void spm_trace_init(struct device *dev)
 		return;
 	rmem = of_reserved_mem_lookup(np);
 	of_node_put(np);
-	if (!rmem)
+	if (!rmem || rmem->size < sizeof(*l) + sizeof(l->ev[0]))
 		return;
 	l = devm_memremap(dev, rmem->base, rmem->size, MEMREMAP_WC);
 	if (IS_ERR(l))
@@ -621,6 +624,7 @@ static int spm_spc_block(void)
 	if (read_poll_timeout(atomic_read, active, !active, 10, 20000, false,
 			      &spm_spc_active)) {
 		spm_spc_timeouts++;
+		spm_trace(SPM_EV_STUCK, active);
 		return -EBUSY;
 	}
 	spm_trace(SPM_EV_DRAINED, div_u64(local_clock() - t0, 1000));
@@ -645,7 +649,10 @@ static int spm_cpufreq_notify(struct notifier_block *nb, unsigned long event,
 
 	if (event == CPUFREQ_PRECHANGE) {
 		spm_trace(SPM_EV_FREQ_PRE, freqs->new / 1000);
-		spm_spc_block();
+		/* A notifier cannot stop the transition: leave evidence */
+		if (spm_spc_block())
+			pr_err_ratelimited("qcom_spm: cpu%u changes frequency with a core still in power collapse\n",
+					   freqs->policy->cpu);
 	} else if (event == CPUFREQ_POSTCHANGE) {
 		spm_spc_unblock();
 		spm_trace(SPM_EV_FREQ_POST, freqs->new / 1000);
@@ -712,6 +719,7 @@ static int spm_stats_show(struct seq_file *s, void *data)
 
 	seq_printf(s, "vdd_writes   %u\n", drv->vdd_writes);
 	seq_printf(s, "vdd_timeouts %u\n", drv->vdd_timeouts);
+	seq_printf(s, "vdd_failures %u\n", drv->vdd_failures);
 	seq_printf(s, "spc_waits    %u\n", spm_spc_waits);
 	seq_printf(s, "spc_timeouts %u\n", spm_spc_timeouts);
 	seq_printf(s, "volt_sel     %u (confirmed)\n", drv->volt_sel);
@@ -817,30 +825,18 @@ static int spm_saw_write_pmic_port(struct spm_driver_data *drv, u32 port,
 					1, 200, false, drv, SPM_REG_PMIC_STS);
 }
 
+/* Attempts at one gang-rail write before it is reported as failed */
+#define SPM_L2_VDD_ATTEMPTS	3
+
 /*
- * smp_set_vdd_v2_1_l2 - Set voltage via L2/APCS SAW2 (MSM8974 gang supply).
- *
- * On MSM8974 only the L2 SAW2 at 0xf9012000 is wired to the PMIC via SPMI.
- * This function is called directly (not via smp_call_function_single) because
- * L2 SAW2 MMIO is bus-accessible from any CPU.
+ * One RST -> VCTL -> PMIC_STS handshake.  PMIC_STS[7:0] is the setpoint the
+ * SAW last sent to the PMIC; it is left in @sts.
  */
-static void smp_set_vdd_v2_1_l2(void *data)
+static int spm_l2_vctl_handshake(struct spm_driver_data *drv,
+				 unsigned int vlevel, unsigned int *sts)
 {
-	struct spm_driver_data *drv = data;
-	unsigned int vctl, avs_ctl, pmic_sts;
-	unsigned int vlevel, volt_sel;
-	bool avs_enabled;
-
-	volt_sel = drv->volt_sel_req;
-	vlevel = volt_sel;
-
-	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
-	avs_enabled = avs_ctl & SPM_2_1_AVS_CTL_AVS_ENABLED;
-
-	if (avs_enabled) {
-		avs_ctl &= ~SPM_2_1_AVS_CTL_AVS_ENABLED;
-		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
-	}
+	unsigned int vctl, pmic_sts;
+	int ret;
 
 	spm_register_write(drv, SPM_REG_RST, 1);
 
@@ -860,31 +856,69 @@ static void smp_set_vdd_v2_1_l2(void *data)
 	 * Wait for the PMIC arbiter to latch the new setpoint.  The analog
 	 * ramp is waited out by the regulator core via ramp_delay.
 	 */
-	if (read_poll_timeout_atomic(spm_register_read,
-				     pmic_sts,
-				     (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
-				     1, 200, false,
-				     drv, SPM_REG_PMIC_STS)) {
-		dev_err_ratelimited(drv->dev, "timeout setting the voltage (%x %x)!\n",
-				    pmic_sts & 0xff, vlevel);
-		drv->set_vdd_ret = -ETIMEDOUT;
+	ret = read_poll_timeout_atomic(spm_register_read, pmic_sts,
+				       (pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL) == vlevel,
+				       1, 200, false, drv, SPM_REG_PMIC_STS);
+	*sts = pmic_sts & SPM_2_1_PMIC_STS_CURR_VLVL;
+
+	return ret;
+}
+
+/*
+ * smp_set_vdd_v2_1_l2 - Set voltage via L2/APCS SAW2 (MSM8974 gang supply).
+ *
+ * On MSM8974 only the L2 SAW2 at 0xf9012000 is wired to the PMIC via SPMI.
+ * This function is called directly (not via smp_call_function_single) because
+ * L2 SAW2 MMIO is bus-accessible from any CPU.
+ */
+static void smp_set_vdd_v2_1_l2(void *data)
+{
+	struct spm_driver_data *drv = data;
+	const struct linear_range *range = drv->reg_data->range;
+	unsigned int avs_ctl, sts = 0;
+	unsigned int volt_sel = drv->volt_sel_req;
+	int attempt;
+
+	/*
+	 * AVS is switched off and left off.  It is off by design on this SoC:
+	 * the vendor programs AVS_CTL/AVS_LIMIT to zero on every SAW at init
+	 * and never arms it.  A window cannot even be expressed in AVS_CTL for
+	 * this SAW - MIN_VLVL and MAX_VLVL are 6 bits wide, inherited from v1.1
+	 * whose selectors fit, while a v2.1 selector reaches 255, so a window
+	 * built from one is silently truncated: selector 180 (900 mV) becomes
+	 * 48 (240 mV), authorising the hardware to track the shared Krait rail
+	 * down to an arbitrary level with no software involvement.
+	 */
+	avs_ctl = spm_register_read(drv, SPM_REG_AVS_CTL);
+	if (avs_ctl & SPM_2_1_AVS_CTL_AVS_ENABLED) {
+		avs_ctl &= ~SPM_2_1_AVS_CTL_AVS_ENABLED;
+		spm_register_write(drv, SPM_REG_AVS_CTL, avs_ctl);
+	}
+
+	for (attempt = 0; attempt < SPM_L2_VDD_ATTEMPTS; attempt++) {
+		if (!spm_l2_vctl_handshake(drv, volt_sel, &sts)) {
+			drv->volt_sel = volt_sel;
+			drv->set_vdd_ret = 0;
+			return;
+		}
 		drv->vdd_timeouts++;
-		return;
 	}
 
 	/*
-	 * AVS is left disabled deliberately.  It is off by design on this SoC:
-	 * the vendor programs AVS_CTL/AVS_LIMIT to zero on every SAW at init
-	 * and never arms it.  The window this code used to rebuild cannot even
-	 * be expressed in the registers it writes - MIN_VLVL and MAX_VLVL are
-	 * 6 bits wide, inherited from v1.1 whose selectors fit, while a v2.1
-	 * selector reaches 255, so a window built from one is silently
-	 * truncated: selector 180 (900 mV) becomes 48 (240 mV), authorising the
-	 * hardware to track the shared Krait rail down to an arbitrary level
-	 * with no software involvement.
+	 * The rail may or may not have moved.  Report what the SAW says it
+	 * last sent rather than the setpoint confirmed before this write: the
+	 * regulator core skips a request that matches the reported selector,
+	 * so a write the PMIC latched after the last poll, left unreported,
+	 * would let a later request for the old level be skipped while the
+	 * rail sits at the new one.
 	 */
-	drv->volt_sel = volt_sel;
-	drv->set_vdd_ret = 0;
+	if (sts >= range->min_sel && sts <= range->max_sel)
+		drv->volt_sel = sts;
+	drv->vdd_failures++;
+	drv->set_vdd_ret = -ETIMEDOUT;
+	dev_err_ratelimited(drv->dev,
+			    "gang rail write failed: requested %#x, PMIC at %#x\n",
+			    volt_sel, sts);
 }
 
 static int spm_get_cpu(struct device *dev)
@@ -951,12 +985,6 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 		dev_dbg(dev, "SAW2 L2 regulator (shared rail)\n");
 	}
 
-	if (IS_ENABLED(CONFIG_DEBUG_FS)) {
-		drv->debugfs = debugfs_create_dir(dev_name(dev), NULL);
-		debugfs_create_file("rail", 0444, drv->debugfs, drv,
-				    &spm_stats_fops);
-	}
-
 	ret = linear_range_get_selector_high(drv->reg_data->range,
 					     drv->reg_data->init_uV,
 					     &drv->volt_sel,
@@ -971,19 +999,31 @@ static int spm_register_regulator(struct device *dev, struct spm_driver_data *dr
 	 * Program initial voltage to hardware so the SAW2 VCTL register
 	 * matches the value we report via get_voltage_sel.
 	 */
-	if (drv->reg_data->set_vdd) {
-		if (drv->reg_cpu >= 0)
-			smp_call_function_single(drv->reg_cpu,
-						 drv->reg_data->set_vdd,
-						 drv, true);
-		else
-			drv->reg_data->set_vdd(drv);
-	}
+	drv->set_vdd_ret = 0;
+	if (drv->reg_cpu >= 0)
+		smp_call_function_single(drv->reg_cpu, drv->reg_data->set_vdd,
+					 drv, true);
+	else
+		drv->reg_data->set_vdd(drv);
+	/*
+	 * Without a confirmed starting point the selector reported to the
+	 * regulator core would be a guess: leave the rail to the bootloader.
+	 */
+	if (drv->set_vdd_ret)
+		return dev_err_probe(dev, drv->set_vdd_ret,
+				     "failed to set the initial voltage\n");
 
 	rdev = devm_regulator_register(dev, rdesc, &config);
 	if (IS_ERR(rdev)) {
 		dev_err(dev, "failed to register regulator\n");
 		return PTR_ERR(rdev);
+	}
+
+	/* Only once nothing can fail any more: the files point at drv */
+	if (IS_ENABLED(CONFIG_DEBUG_FS)) {
+		drv->debugfs = debugfs_create_dir(dev_name(dev), NULL);
+		debugfs_create_file("rail", 0444, drv->debugfs, drv,
+				    &spm_stats_fops);
 	}
 
 	if (drv->reg_data == &spm_reg_8974_8084_l2) {
