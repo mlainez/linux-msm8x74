@@ -247,15 +247,16 @@ after hours of mainline-side theorizing.
 
 ## 5. Staying current with LTS security patches
 
-Every maintained integration branch is kept up to date with its own mainline
-LTS branch automatically by `.github/workflows/stable-sync.yml` (scheduled):
-`6.12/{baseline,staging,rc}` from `linux-6.12.y` and
-`6.18/{baseline,staging,rc}` from `linux-6.18.y`. It fetches the stable branch
-and merges it, pushing on a clean merge. A conflict fails that branch's job,
-names the files and leaves the branch untouched: merge stable into it by hand.
-After a merge into an `rc` branch it requests the citronics-kernel package
-build itself (its pushes cannot trigger notify-kernel-build), so every stable
-update is published as an experimental rc kernel. Rationale: security fixes
-must not wait for the next manual integration round; a stable merge is the
-one case where `rc` moves without a full §1.1 revalidation. `release` never
-moves automatically: it is promoted from a validated `rc` by hand.
+The `baseline` and `staging` branches of every maintained series are kept up
+to date with their mainline LTS branch automatically by
+`.github/workflows/stable-sync.yml` (scheduled): `6.12/{baseline,staging}`
+from `linux-6.12.y` and `6.18/{baseline,staging}` from `linux-6.18.y`. It
+fetches the stable branch and its release tag, from git.kernel.org or, when
+that is unreachable, github.com/gregkh/linux, and merges only a release whose
+tag is signed by the stable release key and points at the fetched commit. A
+clean merge is pushed. A conflict fails that branch's job, names the files and
+leaves the branch untouched: merge stable into it by hand. `rc` never moves
+automatically: a stable update reaches it only when a `staging` that carries
+it passes the §1.1 gates (including the soak) and is promoted. Security fixes
+therefore wait for that promotion; `release` is promoted from a validated `rc`
+by hand.
