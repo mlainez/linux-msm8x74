@@ -58,12 +58,15 @@ jobs:
 
       - name: Fetch stable ${{ matrix.stable }}
         run: |
-          git remote add stable https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git
-          # git.kernel.org occasionally refuses a fetch; retry before failing
-          for attempt in 1 2 3 4; do
-            git fetch --no-tags stable ${{ matrix.stable }} && exit 0
-            echo "Fetch attempt $attempt failed, retrying in $((attempt * 30)) s"
-            sleep $((attempt * 30))
+          # git.kernel.org refuses connections from GitHub's runners now and
+          # then; github.com/gregkh/linux mirrors the same stable branches.
+          for url in https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+                     https://github.com/gregkh/linux.git \
+                     https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+                     https://github.com/gregkh/linux.git; do
+            timeout 900 git fetch --no-tags "$url" ${{ matrix.stable }} && exit 0
+            echo "Fetch from $url failed, trying the next source in 30 s"
+            sleep 30
           done
           exit 1
 
