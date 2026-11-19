@@ -1,20 +1,16 @@
 name: stable-sync
 
-# Keep the integration branches of every maintained series up to date with
+# Keep the baseline and staging branches of every maintained series up to date with
 # their mainline LTS branch (AGENTS.md section 5). Clean merges are pushed
 # directly. A conflict fails that branch's job, names the conflicting files
 # and leaves the branch untouched: resolve it by hand (merge stable into the
 # branch, fix the conflict, push). Each branch is synced independently, so a
 # conflict on one never holds back the others.
 #
-# A push made with GITHUB_TOKEN does not trigger other workflows, so
-# notify-kernel-build never sees these merges: after a merge into an rc
-# branch this workflow asks citronics-kernel to build the packages itself, so
-# every stable update becomes an experimental rc kernel. Release branches are
-# never touched here: promoting an rc to release is a manual step, taken once
-# the rc has been validated on a device (AGENTS.md section 1.1).
-# That needs the KERNEL_DISPATCH_TOKEN secret, a token allowed to send
-# repository_dispatch to Citronics/citronics-kernel (Contents: write).
+# Only baseline and staging are synced: rc moves by promotion from a
+# staging that passed the on-device soak, and release from a validated rc,
+# both by hand (AGENTS.md section 1.1). A promotion push triggers
+# notify-kernel-build, which builds the rc kernel.
 
 on:
   schedule:
@@ -40,13 +36,9 @@ jobs:
             stable: 'linux-6.12.y'
           - branch: '6.12/staging'
             stable: 'linux-6.12.y'
-          - branch: '6.12/rc'
-            stable: 'linux-6.12.y'
           - branch: '6.18/baseline'
             stable: 'linux-6.18.y'
           - branch: '6.18/staging'
-            stable: 'linux-6.18.y'
-          - branch: '6.18/rc'
             stable: 'linux-6.18.y'
     steps:
       - name: Checkout ${{ matrix.branch }}
@@ -210,20 +202,3 @@ jobs:
       - name: Push
         if: steps.merge.outputs.result == 'merged'
         run: git push origin HEAD:${{ matrix.branch }}
-
-      - name: Request the kernel package build
-        if: steps.merge.outputs.result == 'merged' && endsWith(matrix.branch, '/rc')
-        env:
-          KERNEL_DISPATCH_TOKEN: ${{ secrets.KERNEL_DISPATCH_TOKEN }}
-        run: |
-          if [ -z "$KERNEL_DISPATCH_TOKEN" ]; then
-            echo "::error::KERNEL_DISPATCH_TOKEN is not set: ${{ matrix.branch }} moved but no kernel package build was requested."
-            exit 1
-          fi
-          SHA=$(git rev-parse HEAD)
-          curl -sSf -X POST \
-            -H "Authorization: Bearer $KERNEL_DISPATCH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            https://api.github.com/repos/Citronics/citronics-kernel/dispatches \
-            -d "{\"event_type\":\"kernel-rc-updated\",\"client_payload\":{\"branch\":\"${{ matrix.branch }}\",\"sha\":\"$SHA\"}}"
-          echo "Requested a citronics-kernel build for ${{ matrix.branch }} at $SHA."
