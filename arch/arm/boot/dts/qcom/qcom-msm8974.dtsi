@@ -52,6 +52,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
+			dynamic-power-coefficient = <600>;
 			#cooling-cells = <2>;
 		};
 
@@ -70,6 +71,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
+			dynamic-power-coefficient = <600>;
 			#cooling-cells = <2>;
 		};
 
@@ -88,6 +90,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
+			dynamic-power-coefficient = <600>;
 			#cooling-cells = <2>;
 		};
 
@@ -106,6 +109,7 @@
 			power-domains = <&rpmpd MSM8974_VDDCX_AO>;
 			power-domain-names = "cx";
 			cpu-idle-states = <&CPU_SPC>;
+			dynamic-power-coefficient = <600>;
 			#cooling-cells = <2>;
 		};
 

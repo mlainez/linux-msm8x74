@@ -246,6 +246,17 @@ config QCOM_SOCINFO
 	 Say yes here to support the Qualcomm socinfo driver, providing
 	 information about the SoC to user space.
 
+config QCOM_DTPM
+	tristate "Qualcomm DTPM hierarchy"
+	depends on ARCH_QCOM || COMPILE_TEST
+	depends on DTPM_CPU
+	help
+	  Describe the CPUs of Qualcomm SoCs to the powercap DTPM framework,
+	  under one package node, so that a single power limit set through
+	  /sys/class/powercap caps the CPUs as a whole. Useful on boards whose
+	  supply cannot carry every CPU at full speed together with the rest
+	  of the system, such as an MSM8974 phone board run without a battery.
+
 config QCOM_SPM
 	tristate "Qualcomm Subsystem Power Manager (SPM)"
 	depends on ARCH_QCOM || COMPILE_TEST
