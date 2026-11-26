@@ -6,6 +6,9 @@
 
 #include <linux/module.h>
 #include <linux/skbuff.h>
+#include <linux/slab.h>
+#include <linux/spinlock.h>
+#include <linux/workqueue.h>
 #include <linux/rpmsg.h>
 #include <linux/soc/qcom/qrtr.h>
 
@@ -15,6 +18,10 @@ struct qrtr_smd_dev {
 	struct qrtr_endpoint ep;
 	struct rpmsg_endpoint *channel;
 	struct device *dev;
+	/* Ordered, so a server's del never overtakes its add; drained on remove. */
+	struct workqueue_struct *wq;
+	spinlock_t lock;
+	bool removing;
 };
 
 struct qrtr_new_server {
@@ -124,15 +131,17 @@ static void qcom_smd_qrtr_add_device_worker(struct work_struct *work)
 	int ret;
 
 	qdev = kzalloc(sizeof(*qdev), GFP_KERNEL);
-	if (!qdev)
+	if (!qdev) {
+		kfree(new_server);
 		return;
+	}
 
 	qdev->node = new_server->node;
 	qdev->port = new_server->port;
 	qdev->service = new_server->service;
 	qdev->instance = new_server->instance;
 
-	devm_kfree(qsdev->dev, new_server);
+	kfree(new_server);
 
 	dev_set_name(&qdev->dev, "%d-%d", qdev->node, qdev->port);
 
@@ -155,10 +164,25 @@ static void qcom_smd_qrtr_del_device_worker(struct work_struct *work)
 	struct device *dev = device_find_child(qsdev->dev, &del_server->port,
 					       qcom_smd_qrtr_match_device_by_port);
 
-	devm_kfree(qsdev->dev, del_server);
+	kfree(del_server);
 
 	if (dev)
 		device_unregister(dev);
+}
+
+static int qcom_smd_qrtr_queue(struct qrtr_smd_dev *qsdev, struct work_struct *work)
+{
+	unsigned long flags;
+	int ret = 0;
+
+	spin_lock_irqsave(&qsdev->lock, flags);
+	if (qsdev->removing)
+		ret = -ENODEV;
+	else
+		queue_work(qsdev->wq, work);
+	spin_unlock_irqrestore(&qsdev->lock, flags);
+
+	return ret;
 }
 
 static int qcom_smd_qrtr_add_device(struct qrtr_endpoint *parent, unsigned int node,
@@ -167,7 +191,8 @@ static int qcom_smd_qrtr_add_device(struct qrtr_endpoint *parent, unsigned int n
 	struct qrtr_smd_dev *qsdev = container_of(parent, struct qrtr_smd_dev, ep);
 	struct qrtr_new_server *new_server;
 
-	new_server = devm_kzalloc(qsdev->dev, sizeof(struct qrtr_new_server), GFP_KERNEL);
+	/* Called from the SMD rx callback, in hard IRQ on msm8974. */
+	new_server = kzalloc(sizeof(*new_server), GFP_ATOMIC);
 	if (!new_server)
 		return -ENOMEM;
 
@@ -178,7 +203,10 @@ static int qcom_smd_qrtr_add_device(struct qrtr_endpoint *parent, unsigned int n
 	new_server->instance = instance;
 
 	INIT_WORK(&new_server->work, qcom_smd_qrtr_add_device_worker);
-	schedule_work(&new_server->work);
+	if (qcom_smd_qrtr_queue(qsdev, &new_server->work)) {
+		kfree(new_server);
+		return -ENODEV;
+	}
 
 	return 0;
 }
@@ -188,7 +216,7 @@ static int qcom_smd_qrtr_del_device(struct qrtr_endpoint *parent, unsigned int p
 	struct qrtr_smd_dev *qsdev = container_of(parent, struct qrtr_smd_dev, ep);
 	struct qrtr_del_server *del_server;
 
-	del_server = devm_kzalloc(qsdev->dev, sizeof(struct qrtr_del_server), GFP_KERNEL);
+	del_server = kzalloc(sizeof(*del_server), GFP_ATOMIC);
 	if (!del_server)
 		return -ENOMEM;
 
@@ -196,7 +224,10 @@ static int qcom_smd_qrtr_del_device(struct qrtr_endpoint *parent, unsigned int p
 	del_server->port = port;
 
 	INIT_WORK(&del_server->work, qcom_smd_qrtr_del_device_worker);
-	schedule_work(&del_server->work);
+	if (qcom_smd_qrtr_queue(qsdev, &del_server->work)) {
+		kfree(del_server);
+		return -ENODEV;
+	}
 
 	return 0;
 }
@@ -262,10 +293,17 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 	qsdev->ep.xmit = qcom_smd_qrtr_send;
 	qsdev->ep.add_device = qcom_smd_qrtr_add_device;
 	qsdev->ep.del_device = qcom_smd_qrtr_del_device;
+	spin_lock_init(&qsdev->lock);
+
+	qsdev->wq = alloc_ordered_workqueue("qrtr_smd", 0);
+	if (!qsdev->wq)
+		return -ENOMEM;
 
 	rc = qrtr_endpoint_register(&qsdev->ep, QRTR_EP_NID_AUTO);
-	if (rc)
+	if (rc) {
+		destroy_workqueue(qsdev->wq);
 		return rc;
+	}
 
 	dev_set_drvdata(&rpdev->dev, qsdev);
 
@@ -277,10 +315,18 @@ static int qcom_smd_qrtr_probe(struct rpmsg_device *rpdev)
 static void qcom_smd_qrtr_remove(struct rpmsg_device *rpdev)
 {
 	struct qrtr_smd_dev *qsdev = dev_get_drvdata(&rpdev->dev);
+	unsigned long flags;
+
+	/* Pending add/del work must not outlive the device or add children after it. */
+	spin_lock_irqsave(&qsdev->lock, flags);
+	qsdev->removing = true;
+	spin_unlock_irqrestore(&qsdev->lock, flags);
+	drain_workqueue(qsdev->wq);
 
 	device_for_each_child(qsdev->dev, NULL, qcom_smd_qrtr_device_unregister);
 
 	qrtr_endpoint_unregister(&qsdev->ep);
+	destroy_workqueue(qsdev->wq);
 
 	dev_set_drvdata(&rpdev->dev, NULL);
 }
